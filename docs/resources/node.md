@@ -7,7 +7,7 @@ description: |-
   Nodes are immutable: because Jenkins exposes no in-place update for a node's core
   configuration, changing any attribute replaces the node. Use num_executors, labels and
   the rest to describe the agent as code; connect the agent out-of-band with the inbound
-  (JNLP) secret Jenkins issues for it.
+  (JNLP) secret Jenkins issues for it, which the jenkins_node_secret data source reads.
 ---
 
 # jenkins_node (Resource)
@@ -17,7 +17,7 @@ Manages a permanent (static) agent node within Jenkins, launched as an inbound (
 Nodes are immutable: because Jenkins exposes no in-place update for a node's core
 configuration, changing any attribute replaces the node. Use `num_executors`, `labels` and
 the rest to describe the agent as code; connect the agent out-of-band with the inbound
-(JNLP) secret Jenkins issues for it.
+(JNLP) secret Jenkins issues for it, which the `jenkins_node_secret` data source reads.
 
 ## Example Usage
 
