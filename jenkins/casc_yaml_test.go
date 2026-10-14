@@ -77,24 +77,67 @@ func TestYAMLSubset(t *testing.T) {
 		{"secret placeholder with default", "token: ${SECRET:-x}", "token: anything", true},
 		{"type mismatch map vs scalar", "a: 1", "a", false},
 		{"bool values", "flag: true", "flag: true\nother: false", true},
-		// Plugins export set-backed lists in their own order (role permissions in
-		// hash order, disabledAdministrativeMonitors sorted), so the order of a
-		// list of scalars is not drift.
-		{"scalar list order ignored", "[Job/Read, Job/Build, Job/Cancel]", "[Job/Cancel, Job/Read, Job/Build]", true},
-		{"scalar list duplicates counted", "[a, a, b]", "[a, b, b]", false},
-		{"scalar list element missing", "[a, b]", "[a, c]", false},
-		{"scalar list placeholder leaves the literal its match", "['${X}', a]", "[a, b]", true},
+		{"scalar list order is drift", "[a, b]", "[b, a]", false},
 		{"list of mappings stays ordered", "[{a: 1}, {b: 2}]", "[{b: 2}, {a: 1}]", false},
-		{"mixed list stays ordered", "[a, {b: 2}]", "[{b: 2}, a]", false},
 		{"embedded placeholder matches the literal parts", "url: https://${HOST}/x", "url: https://h.example/x", true},
 		{"embedded placeholder literal part drift", "url: https://${HOST}/x", "url: https://h.example/y", false},
 		{"embedded placeholder against a non-string", "n: ${A}0", "n: 10", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := yamlSubset(mustParse(tc.declared), mustParse(tc.actual))
+			got := yamlSubset(mustParse(tc.declared), mustParse(tc.actual), nil)
 			if got != tc.want {
 				t.Errorf("yamlSubset(%q, %q) = %v, want %v", tc.declared, tc.actual, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCASCInSyncSetPaths covers the lists Jenkins exports in hash order: they
+// match in any order, and only they do.
+func TestCASCInSyncSetPaths(t *testing.T) {
+	roles := func(global, items string) string {
+		return "jenkins:\n  authorizationStrategy:\n    roleBased:\n      roles:\n" +
+			"        global:\n          - name: admin\n            permissions: " + global + "\n" +
+			"        items:\n          - name: team\n            pattern: '^team$'\n            permissions: " + items + "\n"
+	}
+	section := func(full string) string {
+		sub, _, err := extractSectionYAML(full, "jenkins")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sub
+	}
+	cases := []struct {
+		name     string
+		declared string // a full document, its jenkins section is declared
+		exported string
+		want     bool
+	}{
+		{"role permissions in another order", roles("[Overall/Read, Overall/Administer]", "[Job/Read, Job/Build, Job/Cancel]"),
+			roles("[Overall/Administer, Overall/Read]", "[Job/Cancel, Job/Read, Job/Build]"), true},
+		{"role permission missing", roles("[Overall/Read]", "[Job/Read, Job/Build]"),
+			roles("[Overall/Read]", "[Job/Read, Job/Cancel]"), false},
+		{"role permission duplicates counted", roles("[Overall/Read]", "[Job/Read, Job/Read, Job/Build]"),
+			roles("[Overall/Read]", "[Job/Read, Job/Build, Job/Build]"), false},
+		{"placeholder leaves the literal its match", roles("[Overall/Read]", "['${PERM}', Job/Read]"),
+			roles("[Overall/Read]", "[Job/Read, Job/Build]"), true},
+		{"disabled monitors in another order", "jenkins:\n  disabledAdministrativeMonitors: [b, a]\n",
+			"jenkins:\n  disabledAdministrativeMonitors: [a, b]\n", true},
+		{"role entries keep their order", "jenkins:\n  authorizationStrategy:\n    roleBased:\n      roles:\n        global:\n          - name: admin\n            entries: [{user: a}, {group: b}]\n",
+			"jenkins:\n  authorizationStrategy:\n    roleBased:\n      roles:\n        global:\n          - name: admin\n            entries: [{group: b}, {user: a}]\n", false},
+		{"other scalar list keeps its order", "jenkins:\n  someList: [b, a]\n", "jenkins:\n  someList: [a, b]\n", false},
+		{"permissions key outside role-strategy keeps its order", "jenkins:\n  other:\n    permissions: [b, a]\n",
+			"jenkins:\n  other:\n    permissions: [a, b]\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cascInSync(section(tc.declared), tc.exported, "jenkins")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("cascInSync = %v, want %v", got, tc.want)
 			}
 		})
 	}

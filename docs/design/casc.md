@@ -91,11 +91,13 @@ every default value. Comparing it verbatim would report constant drift.
   are not drift. This mirrors the semantic-equality approach already used for
   `jenkins_job.template` (`templatesEqual`).
 - **Lists.** A list must keep its length (list configurators replace the whole
-  list). A list of scalars matches in any order: plugins export set-backed
-  lists in their own order, such as role-strategy permissions in `HashSet`
-  order, and requiring the declared order would be a diff at every plan. Lists
-  of mappings are compared element by element, in order. A server-side reorder
-  of a list of scalars is therefore not detected as drift.
+  list) and is compared element by element, in order, since order can be
+  significant (arguments, precedence). The exception is a short, explicit
+  table of set-backed paths (`cascSetPaths`): Jenkins stores those in a
+  `HashSet` and exports them in hash order, so requiring the declared order
+  would be a diff at every plan. They match in any order: role-strategy role
+  `permissions` and `jenkins.disabledAdministrativeMonitors`. A path joins the
+  table once its export order is shown to differ from the applied one.
 - **State model.** State stores the user's **declared** `yaml` (the plan value),
   exactly as written; Read refreshes a normalized readback only to decide
   whether a diff exists — it does not overwrite the stored document with the

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -39,6 +40,36 @@ var reCASCSecretName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // reSecretReference matches a ${NAME} reference that substituteSecrets may
 // fill. Submatch 1 is NAME.
 var reSecretReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// cascSetPaths are the lists of scalars that Jenkins keeps in a HashSet and so
+// exports in hash order, not in the applied one. They are compared in any
+// order; every other list keeps its order, which may be significant. A path
+// starts at the section key; "*" matches any mapping key or list element.
+var cascSetPaths = [][]string{
+	// Role-strategy permissions of global, item and agent roles.
+	{"jenkins", "authorizationStrategy", "roleBased", "roles", "*", "*", "permissions"},
+	{"jenkins", "disabledAdministrativeMonitors"},
+}
+
+// isSetPath reports whether path matches one of cascSetPaths.
+func isSetPath(path []string) bool {
+	for _, pattern := range cascSetPaths {
+		if len(pattern) != len(path) {
+			continue
+		}
+		match := true
+		for i := range pattern {
+			if pattern[i] != "*" && pattern[i] != path[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
 
 // isSecretPlaceholder reports whether v is a scalar JCasC ${...} secret
 // expression.
@@ -79,16 +110,17 @@ func parseYAML(s string) (interface{}, error) {
 //     value; keys present only in actual (defaults, unmanaged settings) are
 //     ignored.
 //   - Sequences: must have the same length, because JCasC list configurators
-//     are replace-semantics. A sequence of scalars matches in any order:
-//     plugins export set-backed lists in their own order (hash order for
-//     role-strategy permissions), which is not drift. Any other sequence
-//     matches element-for-element.
+//     are replace-semantics, and match element-for-element. A list of scalars
+//     at one of cascSetPaths matches in any order instead: Jenkins exports it
+//     in hash order, which is not drift.
 //   - Scalars: must be equal.
 //
 // A declared scalar that is a ${...} secret placeholder matches any actual
 // value, so a resolved secret never registers as drift. A string with ${...}
 // expressions inside it matches on its literal parts only.
-func yamlSubset(declared, actual interface{}) bool {
+//
+// path locates declared from the section key, for cascSetPaths.
+func yamlSubset(declared, actual interface{}, path []string) bool {
 	if isSecretPlaceholder(declared) {
 		return true
 	}
@@ -104,7 +136,7 @@ func yamlSubset(declared, actual interface{}) bool {
 			if !ok {
 				return false
 			}
-			if !yamlSubset(dv, av) {
+			if !yamlSubset(dv, av, append(path[:len(path):len(path)], k)) {
 				return false
 			}
 		}
@@ -114,11 +146,11 @@ func yamlSubset(declared, actual interface{}) bool {
 		if !ok || len(a) != len(d) {
 			return false
 		}
-		if isScalarList(d) {
+		if isScalarList(d) && isSetPath(path) {
 			return unorderedMatch(d, a)
 		}
 		for i := range d {
-			if !yamlSubset(d[i], a[i]) {
+			if !yamlSubset(d[i], a[i], append(path[:len(path):len(path)], strconv.Itoa(i))) {
 				return false
 			}
 		}
@@ -157,7 +189,7 @@ func unorderedMatch(declared, actual []interface{}) bool {
 	var assign func(i int, seen []bool) bool
 	assign = func(i int, seen []bool) bool {
 		for j := range actual {
-			if seen[j] || !yamlSubset(declared[i], actual[j]) {
+			if seen[j] || !yamlSubset(declared[i], actual[j], nil) {
 				continue
 			}
 			seen[j] = true
@@ -207,7 +239,7 @@ func cascInSync(declaredSectionYAML, exportedFullYAML, section string) (bool, er
 		return declared == nil, nil
 	}
 
-	return yamlSubset(declared, actual), nil
+	return yamlSubset(declared, actual, []string{section}), nil
 }
 
 // mapStrings returns a copy of v with f applied to every string scalar.

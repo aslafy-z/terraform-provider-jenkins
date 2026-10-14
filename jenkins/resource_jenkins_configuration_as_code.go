@@ -56,7 +56,7 @@ Each instance owns a single top-level JCasC section (` + "`jenkins`, `security`,
 Key behaviours:
 
 - **Merge, not replace.** Applying a section merges the declared keys into the running configuration; keys present on the controller but not in ` + "`yaml`" + ` are left untouched. Drift is detected as a *subset*: only keys you declare are compared.
-- **Lists of scalars are unordered.** A list whose elements are all scalars (a role's permissions, for example) matches the controller's list in any order, because plugins export set-backed lists in their own order. Every other list is compared element by element, in order.
+- **Lists keep their order, except set-backed ones.** Lists are compared element by element, in order. Jenkins keeps a few lists in a hash set and exports them in hash order, so those match in any order: the ` + "`permissions`" + ` of role-strategy roles (` + "`jenkins.authorizationStrategy.roleBased.roles`" + `) and ` + "`jenkins.disabledAdministrativeMonitors`" + `.
 - **Secrets.** Reference a secret as ` + "`${NAME}`" + ` in ` + "`yaml`" + `. When ` + "`NAME`" + ` is a key of ` + "`secrets_wo`" + `, the provider substitutes the value at apply; otherwise the controller resolves it from its own JCasC secret sources (environment variables, files, ...). Either way the value is never stored in state, and a key whose whole value is a reference is never compared. A string with a reference inside it is compared on its other characters only.
 - **Delete is best-effort.** JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
 
