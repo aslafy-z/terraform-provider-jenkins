@@ -27,7 +27,7 @@ func covEUpdateErr(ctx context.Context, t *testing.T, r resource.Resource, model
 	st := tfsdk.State{Schema: sr.Schema}
 	st.Set(ctx, model)
 	resp := resource.UpdateResponse{State: tfsdk.State{Schema: sr.Schema}}
-	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: st}, &resp)
+	r.Update(ctx, resource.UpdateRequest{Plan: plan, State: st, Config: tfsdk.Config{Schema: sr.Schema, Raw: plan.Raw}}, &resp)
 	if !resp.Diagnostics.HasError() {
 		t.Error("expected Update error")
 	}
@@ -175,7 +175,7 @@ func TestCovE_NodeCascErrors(t *testing.T) {
 		Description: types.StringValue(""), RemoteFS: types.StringValue("/x"), Labels: types.StringValue(""),
 	})
 	// casc Update error (ApplyCASC fails) + Read export error
-	cascModel := &configurationAsCodeResourceModel{Section: types.StringValue("jenkins"), YAML: types.StringValue("systemMessage: hi")}
+	cascModel := &configurationAsCodeResourceModel{Section: types.StringValue("jenkins"), YAML: types.StringValue("systemMessage: hi"), SecretsWo: types.MapNull(types.StringType)}
 	covEUpdateErr(ctx, t, &configurationAsCodeResource{resourceHelper: &resourceHelper{client: &mockJenkinsClient{
 		mockApplyCASC: func(context.Context, string) error { return covEBoom() },
 	}}}, cascModel)

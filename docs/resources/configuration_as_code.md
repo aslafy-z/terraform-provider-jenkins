@@ -6,7 +6,7 @@ description: |-
   Manages one top-level section of the controller configuration through the configuration-as-code (JCasC) plugin.
   Each instance owns a single top-level JCasC section (jenkins, security, unclassified, tool, ...) named by section, and applies the yaml subtree for it. See the design notes https://github.com/namecheap/terraform-provider-jenkins/blob/main/docs/design/casc.md for the full model.
   Key behaviours:
-  Merge, not replace. Applying a section merges the declared keys into the running configuration; keys present on the controller but not in yaml are left untouched. Drift is detected as a subset: only keys you declare are compared.Secrets. Use JCasC ${VAR} interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.Delete is best-effort. JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
+  Merge, not replace. Applying a section merges the declared keys into the running configuration; keys present on the controller but not in yaml are left untouched. Drift is detected as a subset: only keys you declare are compared.Lists of scalars are unordered. A list whose elements are all scalars (a role's permissions, for example) matches the controller's list in any order, because plugins export set-backed lists in their own order. Every other list is compared element by element, in order.Secrets. Reference a secret as ${NAME} in yaml. When NAME is a key of secrets_wo, the provider substitutes the value at apply; otherwise the controller resolves it from its own JCasC secret sources (environment variables, files, ...). Either way the value is never stored in state, and a key whose whole value is a reference is never compared. A string with a reference inside it is compared on its other characters only.Delete is best-effort. JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
   Requires the configuration-as-code plugin and an account with Overall/Administer.
 ---
 
@@ -19,7 +19,8 @@ Each instance owns a single top-level JCasC section (`jenkins`, `security`, `unc
 Key behaviours:
 
 - **Merge, not replace.** Applying a section merges the declared keys into the running configuration; keys present on the controller but not in `yaml` are left untouched. Drift is detected as a *subset*: only keys you declare are compared.
-- **Secrets.** Use JCasC `${VAR}` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.
+- **Lists of scalars are unordered.** A list whose elements are all scalars (a role's permissions, for example) matches the controller's list in any order, because plugins export set-backed lists in their own order. Every other list is compared element by element, in order.
+- **Secrets.** Reference a secret as `${NAME}` in `yaml`. When `NAME` is a key of `secrets_wo`, the provider substitutes the value at apply; otherwise the controller resolves it from its own JCasC secret sources (environment variables, files, ...). Either way the value is never stored in state, and a key whose whole value is a reference is never compared. A string with a reference inside it is compared on its other characters only.
 - **Delete is best-effort.** JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
 
 Requires the `configuration-as-code` plugin and an account with `Overall/Administer`.
@@ -35,11 +36,19 @@ resource "jenkins_configuration_as_code" "system_message" {
   })
 }
 
-# A second instance can own a different top-level section. Secrets use JCasC
-# ${VAR} interpolation, so the resolved value never enters Terraform state.
+# A second instance can own a different top-level section. secrets_wo fills
+# the ${NAME} references at apply and never enters state or plan, so yaml holds
+# no secret and its diff stays readable. Change secrets_wo_version to re-apply
+# after a secret changes. A ${NAME} with no secrets_wo key is resolved by the
+# controller's own JCasC secret sources (environment variables, files, ...).
 resource "jenkins_configuration_as_code" "unclassified" {
   section = "unclassified"
   yaml    = <<-YAML
+    mailer:
+      smtpHost: "smtp.example.com"
+      authentication:
+        username: "jenkins"
+        password: "$${SMTP_PASSWORD}"
     globalLibraries:
       libraries:
         - name: shared-pipeline
@@ -51,6 +60,9 @@ resource "jenkins_configuration_as_code" "unclassified" {
                   remote: "https://git.example.com/jenkins/shared-pipeline.git"
                   credentialsId: "shared-pipeline-token"
   YAML
+
+  secrets_wo         = { SMTP_PASSWORD = var.smtp_password }
+  secrets_wo_version = "1"
 }
 ```
 
@@ -60,7 +72,14 @@ resource "jenkins_configuration_as_code" "unclassified" {
 ### Required
 
 - `section` (String) The top-level JCasC configuration section this resource manages, e.g. `jenkins`, `security`, `unclassified`, or `tool`. Changing it forces replacement.
-- `yaml` (String) The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation.
+- `yaml` (String) The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets as `${NAME}`, filled from `secrets_wo` or by the controller's JCasC interpolation.
+
+### Optional
+
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `secrets_wo` (Map of String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Secret values substituted for the `${NAME}` references of `yaml` at apply, keyed by `NAME`. Write-only: the values are **never stored in Terraform state or plan**, so `yaml` itself holds no secret and its diff stays readable. A value is applied verbatim: the provider escapes any `${` in it, so JCasC does not interpolate it. Every key must be referenced in `yaml`, since JCasC silently resolves a misspelled reference to an empty string. A reference written `^${NAME}` is JCasC's escaped literal and is not substituted. Requires Terraform >= 1.11 and must be paired with `secrets_wo_version`.
+- `secrets_wo_version` (String) Version identifier for `secrets_wo`. Because a write-only value is not stored in state, Terraform cannot detect when it changes; change this value (e.g. after rotating a secret) to have Terraform re-apply the section with the current `secrets_wo`. Required when `secrets_wo` is set.
 
 ### Read-Only
 

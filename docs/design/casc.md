@@ -90,6 +90,12 @@ every default value. Comparing it verbatim would report constant drift.
   semantically: key order, indentation, quoting style, and scalar formatting
   are not drift. This mirrors the semantic-equality approach already used for
   `jenkins_job.template` (`templatesEqual`).
+- **Lists.** A list must keep its length (list configurators replace the whole
+  list). A list of scalars matches in any order: plugins export set-backed
+  lists in their own order, such as role-strategy permissions in `HashSet`
+  order, and requiring the declared order would be a diff at every plan. Lists
+  of mappings are compared element by element, in order. A server-side reorder
+  of a list of scalars is therefore not detected as drift.
 - **State model.** State stores the user's **declared** `yaml` (the plan value),
   exactly as written; Read refreshes a normalized readback only to decide
   whether a diff exists — it does not overwrite the stored document with the
@@ -110,8 +116,21 @@ every default value. Comparing it verbatim would report constant drift.
   resolved value — the export re-emits such keys as their interpolated form or a
   redacted marker, so we compare structurally and never resolve. This prevents
   both false drift and secret leakage.
+- **Secrets from Terraform.** A secret Terraform holds (a generated password,
+  a value read from a secret store) is passed in the write-only `secrets_wo`
+  map, keyed by the `NAME` of its `${NAME}` references, with
+  `secrets_wo_version` as the rotation trigger. The provider substitutes the
+  values into the document it POSTs, and only there: state and plan keep the
+  placeholders, so `yaml` needs no `sensitive()` and its diff stays readable.
+  JCasC interpolates the posted document, substituted values included, so the
+  provider escapes each `${` of a value as `^${`; a `${decodeBase64:...}`
+  wrapper would not protect it, its decoded output is interpolated too. A
+  `secrets_wo` key that `yaml` does not reference is an error, because JCasC
+  resolves an unknown `${NAME}` to an empty string without complaint.
+- **Embedded references.** A string with a `${...}` inside it, such as
+  `https://${HOST}/path`, is compared on its literal parts only.
 - **Tested invariant.** An acceptance test asserts that a secret supplied via
-  `${...}` does not appear in the resource state.
+  `secrets_wo` does not appear in the resource state.
 
 ## Q4 — Failure atomicity
 

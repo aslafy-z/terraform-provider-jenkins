@@ -1,6 +1,9 @@
 package jenkins
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestIsSecretPlaceholder(t *testing.T) {
 	cases := map[string]struct {
@@ -74,6 +77,18 @@ func TestYAMLSubset(t *testing.T) {
 		{"secret placeholder with default", "token: ${SECRET:-x}", "token: anything", true},
 		{"type mismatch map vs scalar", "a: 1", "a", false},
 		{"bool values", "flag: true", "flag: true\nother: false", true},
+		// Plugins export set-backed lists in their own order (role permissions in
+		// hash order, disabledAdministrativeMonitors sorted), so the order of a
+		// list of scalars is not drift.
+		{"scalar list order ignored", "[Job/Read, Job/Build, Job/Cancel]", "[Job/Cancel, Job/Read, Job/Build]", true},
+		{"scalar list duplicates counted", "[a, a, b]", "[a, b, b]", false},
+		{"scalar list element missing", "[a, b]", "[a, c]", false},
+		{"scalar list placeholder leaves the literal its match", "['${X}', a]", "[a, b]", true},
+		{"list of mappings stays ordered", "[{a: 1}, {b: 2}]", "[{b: 2}, {a: 1}]", false},
+		{"mixed list stays ordered", "[a, {b: 2}]", "[{b: 2}, a]", false},
+		{"embedded placeholder matches the literal parts", "url: https://${HOST}/x", "url: https://h.example/x", true},
+		{"embedded placeholder literal part drift", "url: https://${HOST}/x", "url: https://h.example/y", false},
+		{"embedded placeholder against a non-string", "n: ${A}0", "n: 10", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,7 +102,7 @@ func TestYAMLSubset(t *testing.T) {
 
 func TestWrapSection(t *testing.T) {
 	t.Run("wraps a subtree under its section key", func(t *testing.T) {
-		doc, err := wrapSection("jenkins", "systemMessage: hi")
+		doc, err := wrapSection("jenkins", "systemMessage: hi", nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -106,10 +121,85 @@ func TestWrapSection(t *testing.T) {
 	})
 
 	t.Run("invalid YAML errors", func(t *testing.T) {
-		if _, err := wrapSection("jenkins", "a: [bad\n"); err == nil {
+		if _, err := wrapSection("jenkins", "a: [bad\n", nil); err == nil {
 			t.Error("expected an error for malformed YAML")
 		}
 	})
+
+	t.Run("substitutes secrets", func(t *testing.T) {
+		doc, err := wrapSection("unclassified", "mailer:\n  password: ${PASS}\n", map[string]string{"PASS": "s3cr3t"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if want := "unclassified:\n    mailer:\n        password: s3cr3t\n"; doc != want {
+			t.Errorf("wrapSection = %q, want %q", doc, want)
+		}
+	})
+}
+
+func TestSubstituteSecrets(t *testing.T) {
+	secrets := map[string]string{
+		"A":      "s3cr3t",
+		"QUOTES": "it's \"quoted\": yes\nsecond line",
+		"DOLLAR": "x${HOME}y",
+		"CARET":  "^${HOME}",
+	}
+	cases := []struct {
+		name     string
+		declared string
+		want     interface{}
+	}{
+		{"whole scalar", "${A}", "s3cr3t"},
+		{"embedded", "https://user:${A}@host/${A}", "https://user:s3cr3t@host/s3cr3t"},
+		{"escaped reference is left for JCasC", "^${A}", "^${A}"},
+		{"unknown name is left for JCasC", "${OTHER}", "${OTHER}"},
+		{"default form is left for JCasC", "${A:-fallback}", "${A:-fallback}"},
+		// JCasC interpolates the applied document, a substituted value included;
+		// ^ before ${ is its escape, so the controller stores x${HOME}y.
+		{"interpolation in a value is escaped", "${DOLLAR}", "x^${HOME}y"},
+		{"escape in a value is escaped", "${CARET}", "^^${HOME}"},
+		{"value with YAML syntax", "${QUOTES}", "it's \"quoted\": yes\nsecond line"},
+		{"non-string scalar untouched", "42", 42},
+		{"nested in maps and lists", "outer:\n  list: [plain, '${A}']\n  '${A}': key", map[string]interface{}{
+			"outer": map[string]interface{}{
+				"list": []interface{}{"plain", "s3cr3t"},
+				"${A}": "key",
+			},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			declared, err := parseYAML(tc.declared)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.declared, err)
+			}
+			got := substituteSecrets(declared, secrets)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("substituteSecrets(%q) = %#v, want %#v", tc.declared, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("declared tree is not modified", func(t *testing.T) {
+		declared, _ := parseYAML("a: ${A}\nl: ['${A}']")
+		substituteSecrets(declared, secrets)
+		m := declared.(map[string]interface{})
+		if m["a"] != "${A}" || m["l"].([]interface{})[0] != "${A}" {
+			t.Errorf("declared tree was modified: %#v", m)
+		}
+	})
+}
+
+func TestSecretReferences(t *testing.T) {
+	declared, err := parseYAML("a: ${ONE}\nb: ['x-${TWO}-y', '^${THREE}', '${FOUR:-d}']\n'${FIVE}': k\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := secretReferences(declared)
+	want := map[string]bool{"ONE": true, "TWO": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("secretReferences = %v, want %v", got, want)
+	}
 }
 
 func TestExtractSectionYAML(t *testing.T) {

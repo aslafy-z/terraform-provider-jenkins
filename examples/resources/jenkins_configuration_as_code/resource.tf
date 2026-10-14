@@ -6,11 +6,19 @@ resource "jenkins_configuration_as_code" "system_message" {
   })
 }
 
-# A second instance can own a different top-level section. Secrets use JCasC
-# ${VAR} interpolation, so the resolved value never enters Terraform state.
+# A second instance can own a different top-level section. secrets_wo fills
+# the ${NAME} references at apply and never enters state or plan, so yaml holds
+# no secret and its diff stays readable. Change secrets_wo_version to re-apply
+# after a secret changes. A ${NAME} with no secrets_wo key is resolved by the
+# controller's own JCasC secret sources (environment variables, files, ...).
 resource "jenkins_configuration_as_code" "unclassified" {
   section = "unclassified"
   yaml    = <<-YAML
+    mailer:
+      smtpHost: "smtp.example.com"
+      authentication:
+        username: "jenkins"
+        password: "$${SMTP_PASSWORD}"
     globalLibraries:
       libraries:
         - name: shared-pipeline
@@ -22,4 +30,7 @@ resource "jenkins_configuration_as_code" "unclassified" {
                   remote: "https://git.example.com/jenkins/shared-pipeline.git"
                   credentialsId: "shared-pipeline-token"
   YAML
+
+  secrets_wo         = { SMTP_PASSWORD = var.smtp_password }
+  secrets_wo_version = "1"
 }

@@ -41,6 +41,9 @@ func TestCovD3_ConfigurationAsCodeCRUD(t *testing.T) {
 			ID:      types.StringValue(section),
 			Section: types.StringValue(section),
 			YAML:    types.StringValue(yaml),
+
+			SecretsWo:        types.MapNull(types.StringType),
+			SecretsWoVersion: types.StringNull(),
 		}
 	}
 
@@ -50,7 +53,7 @@ func TestCovD3_ConfigurationAsCodeCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model("jenkins", "systemMessage: hi"))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if resp.Diagnostics.HasError() {
 			t.Errorf("unexpected diags: %v", resp.Diagnostics)
 		}
@@ -62,7 +65,7 @@ func TestCovD3_ConfigurationAsCodeCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model("jenkins", "systemMessage: hi"))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error from ApplyCASC")
 		}
@@ -75,7 +78,7 @@ func TestCovD3_ConfigurationAsCodeCRUD(t *testing.T) {
 		// A tab in the indentation is illegal in YAML and fails wrapSection.
 		plan.Set(ctx, model("jenkins", "a:\n\tb: c"))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error from invalid YAML")
 		}
@@ -145,7 +148,7 @@ func TestCovD3_ConfigurationAsCodeCRUD(t *testing.T) {
 		st := tfsdk.State{Schema: s}
 		st.Set(ctx, model("jenkins", "systemMessage: old"))
 		resp := resource.UpdateResponse{State: tfsdk.State{Schema: s}}
-		r.Update(ctx, resource.UpdateRequest{Plan: plan, State: st}, &resp)
+		r.Update(ctx, resource.UpdateRequest{Plan: plan, State: st, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if resp.Diagnostics.HasError() {
 			t.Errorf("unexpected diags: %v", resp.Diagnostics)
 		}
@@ -157,7 +160,7 @@ func TestCovD3_ConfigurationAsCodeCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model("jenkins", "systemMessage: hi"))
 		resp := resource.UpdateResponse{State: tfsdk.State{Schema: s}}
-		r.Update(ctx, resource.UpdateRequest{Plan: plan, State: tfsdk.State{Schema: s}}, &resp)
+		r.Update(ctx, resource.UpdateRequest{Plan: plan, State: tfsdk.State{Schema: s}, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error from ApplyCASC on update")
 		}
@@ -243,7 +246,7 @@ func TestCovD3_CredentialDomainCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if resp.Diagnostics.HasError() {
 			t.Errorf("unexpected diags: %v", resp.Diagnostics)
 		}
@@ -257,7 +260,7 @@ func TestCovD3_CredentialDomainCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error from CreateCredentialDomain")
 		}
@@ -273,7 +276,7 @@ func TestCovD3_CredentialDomainCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model("team"))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error for missing folder")
 		}
@@ -431,7 +434,7 @@ func TestCovD3_PipelineJobCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if resp.Diagnostics.HasError() {
 			t.Errorf("unexpected diags: %v", resp.Diagnostics)
 		}
@@ -447,7 +450,7 @@ func TestCovD3_PipelineJobCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model("team"))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected invalid-folder error")
 		}
@@ -463,7 +466,7 @@ func TestCovD3_PipelineJobCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error from CreateJobInFolder")
 		}
@@ -480,7 +483,7 @@ func TestCovD3_PipelineJobCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected read-back error when job not found after create")
 		}
@@ -628,7 +631,7 @@ func TestCovD3_MultibranchPipelineCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if resp.Diagnostics.HasError() {
 			t.Errorf("unexpected diags: %v", resp.Diagnostics)
 		}
@@ -644,7 +647,7 @@ func TestCovD3_MultibranchPipelineCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model("team"))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected invalid-folder error")
 		}
@@ -660,7 +663,7 @@ func TestCovD3_MultibranchPipelineCRUD(t *testing.T) {
 		plan := tfsdk.Plan{Schema: s}
 		plan.Set(ctx, model(""))
 		resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
-		r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
+		r.Create(ctx, resource.CreateRequest{Plan: plan, Config: tfsdk.Config{Schema: s, Raw: plan.Raw}}, &resp)
 		if !resp.Diagnostics.HasError() {
 			t.Error("expected error from CreateJobInFolder")
 		}
