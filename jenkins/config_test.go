@@ -25,6 +25,7 @@ type mockJenkinsClient struct {
 	mockGetNode           func(ctx context.Context, name string) (*jenkins.Node, error)
 	mockDeleteNode        func(ctx context.Context, name string) (bool, error)
 	mockGetNodeConfig     func(ctx context.Context, name string, out interface{}) error
+	mockGetNodeSecret     func(ctx context.Context, name string) (string, error)
 	mockCreateCredDomain  func(ctx context.Context, folder, name, description string) error
 	mockGetCredDomain     func(ctx context.Context, folder, name string, out interface{}) error
 	mockUpdateCredDomain  func(ctx context.Context, folder, name, description string) error
@@ -180,6 +181,10 @@ func (m *mockJenkinsClient) DeleteNode(ctx context.Context, name string) (bool, 
 
 func (m *mockJenkinsClient) GetNodeConfig(ctx context.Context, name string, out interface{}) error {
 	return m.mockGetNodeConfig(ctx, name, out)
+}
+
+func (m *mockJenkinsClient) GetNodeSecret(ctx context.Context, name string) (string, error) {
+	return m.mockGetNodeSecret(ctx, name)
 }
 
 func (m *mockJenkinsClient) CreateCredentialDomain(ctx context.Context, folder, name, description string) error {
