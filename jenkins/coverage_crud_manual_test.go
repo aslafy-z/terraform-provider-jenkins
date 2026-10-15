@@ -120,6 +120,18 @@ func TestCovM_Role(t *testing.T) {
 		t.Errorf("role Create on an existing role: diags=%v, modified=%v; want an error and no change", existsResp.Diagnostics, adopted)
 	}
 
+	// Create stops when the existence check itself fails.
+	var added bool
+	rGetErr := &roleResource{resourceHelper: &resourceHelper{client: &mockJenkinsClient{
+		mockGetRole: func(context.Context, string, string, interface{}) error { return covMErr() },
+		mockAddRole: func(context.Context, string, string, []string, string, bool) error { added = true; return nil },
+	}}}
+	getErrResp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
+	rGetErr.Create(ctx, resource.CreateRequest{Plan: existsPlan}, &getErrResp)
+	if !getErrResp.Diagnostics.HasError() || added {
+		t.Errorf("role Create with a failing existence check: diags=%v, added=%v; want an error and no addRole", getErrResp.Diagnostics, added)
+	}
+
 	// Create error
 	rErr := &roleResource{resourceHelper: &resourceHelper{client: &mockJenkinsClient{
 		mockAddRole: func(_ context.Context, _, _ string, _ []string, _ string, _ bool) error { return covMErr() },
