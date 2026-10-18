@@ -199,14 +199,16 @@ func TestCovM_RoleCreateRollback(t *testing.T) {
 	}
 
 	tests := []struct {
-		name         string
-		assignErr    error
-		readBackErr  error // returned by populate's GetRole, the second after addRole
-		removeErr    error
-		wantRollback bool
-		wantDiags    []string
+		name            string
+		assignErr       error
+		readBackErr     error // returned by populate's GetRole, the second after addRole
+		readBackMissing bool  // populate's GetRole finds no role
+		removeErr       error
+		wantRollback    bool
+		wantState       bool
+		wantDiags       []string
 	}{
-		{name: "success keeps the role"},
+		{name: "success keeps the role", wantState: true},
 		{
 			name:         "reconcile failure deletes the role",
 			assignErr:    covMErr(),
@@ -214,10 +216,18 @@ func TestCovM_RoleCreateRollback(t *testing.T) {
 			wantDiags:    []string{"Unable to Assign Role"},
 		},
 		{
-			name:         "read-back failure deletes the role",
-			readBackErr:  covMErr(),
-			wantRollback: true,
-			wantDiags:    []string{"Unable to Refresh Resource"},
+			// The role is correct, only reading it failed: keep it and save
+			// state, so Terraform taints it instead of the role being deleted.
+			name:        "read-back failure keeps the role",
+			readBackErr: covMErr(),
+			wantState:   true,
+			wantDiags:   []string{"Unable to Refresh Resource"},
+		},
+		{
+			name:            "role missing on read-back deletes it",
+			readBackMissing: true,
+			wantRollback:    true,
+			wantDiags:       []string{"Unable to Read Created Resource"},
 		},
 		{
 			name:         "failed rollback reports the orphan",
@@ -239,6 +249,9 @@ func TestCovM_RoleCreateRollback(t *testing.T) {
 					if reads++; reads == 2 && tt.readBackErr != nil {
 						return tt.readBackErr
 					}
+					if reads == 2 && tt.readBackMissing {
+						return nil
+					}
 					resp := out.(*roleStrategyRoleResponse)
 					resp.PermissionIDs = map[string]bool{"hudson.model.Hudson.Read": true}
 					if !tt.wantRollback {
@@ -253,11 +266,14 @@ func TestCovM_RoleCreateRollback(t *testing.T) {
 			s := covMSchema(ctx, r)
 			plan := tfsdk.Plan{Schema: s}
 			plan.Set(ctx, model)
-			resp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
+			resp := resource.CreateResponse{State: tfsdk.State{Schema: s, Raw: covMNull(ctx, s)}}
 			r.Create(ctx, resource.CreateRequest{Plan: plan}, &resp)
 
 			if removed != tt.wantRollback {
 				t.Errorf("RemoveRole called = %v, want %v", removed, tt.wantRollback)
+			}
+			if got := !resp.State.Raw.IsNull(); got != tt.wantState {
+				t.Errorf("state saved = %v, want %v", got, tt.wantState)
 			}
 			var got []string
 			for _, d := range resp.Diagnostics.Errors() {

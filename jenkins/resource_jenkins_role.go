@@ -200,10 +200,20 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	if found := r.populate(ctx, &data, &resp.Diagnostics); !found && !resp.Diagnostics.HasError() {
-		resp.Diagnostics.AddError("Unable to Read Created Resource", "the role was created but could not be read back")
-	}
+	planned := data
+	found := r.populate(ctx, &data, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
+		// The role was created and its entries reconciled; only reading it
+		// back failed, possibly for a passing reason. Deleting it would drop
+		// the access just granted, so it is saved as planned instead, and
+		// Terraform taints it: the next plan shows the replacement, which
+		// terraform untaint cancels.
+		planned.ID = types.StringValue(planned.Type.ValueString() + "/" + planned.Name.ValueString())
+		resp.Diagnostics.Append(resp.State.Set(ctx, &planned)...)
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError("Unable to Read Created Resource", "the role was created but could not be read back")
 		r.rollback(ctx, apiType, data.Name.ValueString(), &resp.Diagnostics)
 		return
 	}
