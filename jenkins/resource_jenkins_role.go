@@ -117,9 +117,14 @@ Assignments are **authoritative**: the provider makes the role's entries exactly
 			"pattern": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
-				MarkdownDescription: "A regular expression matching the item/agent names the role applies to (e.g. `team-a/.*`). Required for `item` and `agent` roles (defaults to `.*`); must be omitted for `global` roles.",
+				MarkdownDescription: "A regular expression matching the item/agent names the role applies to (e.g. `team-a/.*`). Required for `item` and `agent` roles (defaults to `.*`); must be omitted for `global` roles. Must not be empty. When omitted, an `item` or `agent` role is planned with `.*` even if the role on the controller has another pattern, so set it explicitly on an imported role to keep a narrower one.",
 				PlanModifiers: []planmodifier.String{
 					rolePatternPlanModifier{},
+				},
+				Validators: []validator.String{
+					// role-strategy stores an empty pattern as ".*" and a global
+					// role as no pattern, so "" never reads back as configured.
+					stringvalidator.LengthAtLeast(1),
 				},
 			},
 			"permissions": schema.SetAttribute{

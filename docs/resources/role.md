@@ -75,7 +75,7 @@ resource "jenkins_role" "admin" {
 
 - `assignments` (Set of String, Deprecated) The SIDs the role is assigned to as ambiguous User/Group entries, which match a user or a group of that name. Authoritative: unmanaged ambiguous entries are removed. Prefer `users` and `groups`.
 - `groups` (Set of String) The group names the role is assigned to, as Group entries (e.g. `authenticated`, or a group of the security realm). Authoritative: unmanaged Group entries are removed.
-- `pattern` (String) A regular expression matching the item/agent names the role applies to (e.g. `team-a/.*`). Required for `item` and `agent` roles (defaults to `.*`); must be omitted for `global` roles.
+- `pattern` (String) A regular expression matching the item/agent names the role applies to (e.g. `team-a/.*`). Required for `item` and `agent` roles (defaults to `.*`); must be omitted for `global` roles. Must not be empty. When omitted, an `item` or `agent` role is planned with `.*` even if the role on the controller has another pattern, so set it explicitly on an imported role to keep a narrower one.
 - `users` (Set of String) The user IDs the role is assigned to, as User entries. Authoritative: unmanaged User entries are removed.
 
 ### Read-Only

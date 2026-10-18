@@ -142,6 +142,31 @@ resource jenkins_role dev {
 	})
 }
 
+func TestAccJenkinsRole_emptyPattern(t *testing.T) {
+	name := "tf-acc-test-" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	for _, roleType := range []string{"item", "global"} {
+		t.Run(roleType, func(t *testing.T) {
+			resource.Test(t, resource.TestCase{
+				PreCheck:                 func() { testAccPreCheck(t) },
+				ProtoV6ProviderFactories: testAccProviders,
+				CheckDestroy:             testAccCheckJenkinsRoleDestroy,
+				Steps: []resource.TestStep{
+					{
+						Config: fmt.Sprintf(`
+resource jenkins_role dev {
+	type        = "%s"
+	name        = "%s"
+	pattern     = ""
+	permissions = ["hudson.model.Item.Read"]
+}`, roleType, name),
+						ExpectError: regexp.MustCompile(`string length must be at least 1`),
+					},
+				},
+			})
+		})
+	}
+}
+
 func TestAccJenkinsRole_item(t *testing.T) {
 	randString := acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
 	name := "tf-acc-test-" + randString

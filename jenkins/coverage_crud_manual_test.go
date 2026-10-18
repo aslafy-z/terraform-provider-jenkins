@@ -11,9 +11,11 @@ import (
 
 	jenkins "github.com/bndr/gojenkins"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -692,6 +694,36 @@ func TestRolePatternPlanModifier(t *testing.T) {
 			}
 			if !resp.PlanValue.Equal(tt.want) {
 				t.Errorf("plan = %v, want %v", resp.PlanValue, tt.want)
+			}
+		})
+	}
+}
+
+func TestRolePatternValidators(t *testing.T) {
+	ctx := context.Background()
+	s := covMSchema(ctx, &roleResource{resourceHelper: &resourceHelper{}})
+	patternAttr := s.Attributes["pattern"].(rschema.StringAttribute)
+
+	tests := []struct {
+		name    string
+		value   types.String
+		wantErr bool
+	}{
+		// role-strategy stores "" as ".*", so the apply would end in an
+		// inconsistent result.
+		{"empty", types.StringValue(""), true},
+		{"pattern", types.StringValue("team/.*"), false},
+		{"unset", types.StringNull(), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := validator.StringRequest{Path: path.Root("pattern"), ConfigValue: tt.value}
+			resp := &validator.StringResponse{}
+			for _, v := range patternAttr.Validators {
+				v.ValidateString(ctx, req, resp)
+			}
+			if got := resp.Diagnostics.HasError(); got != tt.wantErr {
+				t.Errorf("error = %v, want %v: %v", got, tt.wantErr, resp.Diagnostics)
 			}
 		})
 	}
