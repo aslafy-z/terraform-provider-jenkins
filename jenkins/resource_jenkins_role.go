@@ -118,6 +118,9 @@ Assignments are **authoritative**: the provider makes the role's entries exactly
 				Optional:            true,
 				Computed:            true,
 				MarkdownDescription: "A regular expression matching the item/agent names the role applies to (e.g. `team-a/.*`). Required for `item` and `agent` roles (defaults to `.*`); must be omitted for `global` roles.",
+				PlanModifiers: []planmodifier.String{
+					rolePatternPlanModifier{},
+				},
 			},
 			"permissions": schema.SetAttribute{
 				Required:            true,
@@ -265,8 +268,6 @@ func (r *roleResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	// An overwrite drops every entry of the role on role-strategy releases
 	// before 927, so a change to the entries alone leaves the role in place.
-	// An item or agent role without a configured pattern is still overwritten
-	// on each update: "" never matches the pattern read back from Jenkins.
 	if !data.Permissions.Equal(prior.Permissions) || pattern != prior.Pattern.ValueString() {
 		if err := r.client.AddRole(ctx, apiType, data.Name.ValueString(), permissions, pattern, true); err != nil {
 			resp.Diagnostics.AddError("Unable to Update Resource", "An unexpected error occurred while updating the role.\n\nError: "+err.Error())
@@ -470,4 +471,34 @@ func setStrings(ctx context.Context, s types.Set, diags *diag.Diagnostics) []str
 	var out []string
 	diags.Append(s.ElementsAs(ctx, &out, false)...)
 	return out
+}
+
+// rolePatternPlanModifier plans the pattern role-strategy stores when none is
+// configured: ".*" for an item or agent role, none for a global role. A known
+// plan keeps Update from overwriting the role for a pattern that did not
+// change, and shows the real value instead of "known after apply".
+type rolePatternPlanModifier struct{}
+
+func (m rolePatternPlanModifier) Description(context.Context) string {
+	return "Plans .* for an item or agent role without a pattern, and no pattern for a global role."
+}
+
+func (m rolePatternPlanModifier) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (m rolePatternPlanModifier) PlanModifyString(ctx context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if !req.ConfigValue.IsNull() {
+		return
+	}
+	var roleType types.String
+	resp.Diagnostics.Append(req.Plan.GetAttribute(ctx, path.Root("type"), &roleType)...)
+	if roleType.IsUnknown() || roleType.IsNull() {
+		return
+	}
+	if roleType.ValueString() == "global" {
+		resp.PlanValue = types.StringNull()
+		return
+	}
+	resp.PlanValue = types.StringValue(".*")
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -627,4 +628,48 @@ func TestCovM_Folder(t *testing.T) {
 	}}}
 	fdResp := resource.DeleteResponse{State: st}
 	frDel.Delete(ctx, resource.DeleteRequest{State: st}, &fdResp)
+}
+
+func TestRolePatternPlanModifier(t *testing.T) {
+	ctx := context.Background()
+	r := &roleResource{resourceHelper: &resourceHelper{}}
+	s := covMSchema(ctx, r)
+
+	tests := []struct {
+		name     string
+		roleType tftypes.Value
+		config   types.String
+		want     types.String
+	}{
+		{"item without pattern", tftypes.NewValue(tftypes.String, "item"), types.StringNull(), types.StringValue(".*")},
+		{"agent without pattern", tftypes.NewValue(tftypes.String, "agent"), types.StringNull(), types.StringValue(".*")},
+		{"global without pattern", tftypes.NewValue(tftypes.String, "global"), types.StringNull(), types.StringNull()},
+		{"configured pattern kept", tftypes.NewValue(tftypes.String, "item"), types.StringValue("team/.*"), types.StringValue("team/.*")},
+		{"unknown type left unknown", tftypes.NewValue(tftypes.String, tftypes.UnknownValue), types.StringNull(), types.StringUnknown()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objType := s.Type().TerraformType(ctx).(tftypes.Object)
+			vals := map[string]tftypes.Value{}
+			for k, at := range objType.AttributeTypes {
+				vals[k] = tftypes.NewValue(at, nil)
+			}
+			vals["type"] = tt.roleType
+			plan := tfsdk.Plan{Schema: s, Raw: tftypes.NewValue(objType, vals)}
+
+			planValue := tt.config
+			if tt.config.IsNull() {
+				planValue = types.StringUnknown()
+			}
+			req := planmodifier.StringRequest{Plan: plan, ConfigValue: tt.config, PlanValue: planValue}
+			resp := &planmodifier.StringResponse{PlanValue: planValue}
+			rolePatternPlanModifier{}.PlanModifyString(ctx, req, resp)
+			if resp.Diagnostics.HasError() {
+				t.Fatalf("diagnostics: %v", resp.Diagnostics)
+			}
+			if !resp.PlanValue.Equal(tt.want) {
+				t.Errorf("plan = %v, want %v", resp.PlanValue, tt.want)
+			}
+		})
+	}
 }

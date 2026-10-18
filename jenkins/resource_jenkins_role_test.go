@@ -10,7 +10,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
 )
 
 func TestAccJenkinsRole_global(t *testing.T) {
@@ -80,6 +83,60 @@ resource jenkins_role foo {
 				ResourceName:      resourceName,
 				ImportState:       true,
 				ImportStateVerify: true,
+			},
+		},
+	})
+}
+
+// An item or agent role without a configured pattern plans the ".*" the
+// plugin stores, so an update leaves the pattern, and the role, alone.
+func TestAccJenkinsRole_defaultPattern(t *testing.T) {
+	name := "tf-acc-test-" + acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+	resourceName := "jenkins_role.dev"
+	config := func(roleType, users string) string {
+		return fmt.Sprintf(`
+resource jenkins_role dev {
+	type        = "%s"
+	name        = "%s"
+	permissions = ["hudson.model.Item.Read"]
+	users       = %s
+}`, roleType, name, users)
+	}
+	pattern := func(want knownvalue.Check) plancheck.PlanCheck {
+		return plancheck.ExpectKnownValue(resourceName, tfjsonpath.New("pattern"), want)
+	}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		CheckDestroy:             testAccCheckJenkinsRoleDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config:           config("global", `["alice"]`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{pattern(knownvalue.Null())}},
+				Check:            resource.TestCheckNoResourceAttr(resourceName, "pattern"),
+			},
+			{
+				// A type change replaces the role; the new item role gets ".*".
+				Config: config("item", `["alice"]`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionReplace),
+					pattern(knownvalue.StringExact(".*")),
+				}},
+				Check: resource.TestCheckResourceAttr(resourceName, "pattern", ".*"),
+			},
+			{
+				Config: config("item", `["alice", "bob"]`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionUpdate),
+					pattern(knownvalue.StringExact(".*")),
+				}},
+				Check: testAccCheckJenkinsRoleEntries("projectRoles", name,
+					roleEntry{Type: roleEntryUser, Sid: "alice"}, roleEntry{Type: roleEntryUser, Sid: "bob"}),
+			},
+			{
+				Config:           config("item", `["alice", "bob"]`),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
 			},
 		},
 	})
