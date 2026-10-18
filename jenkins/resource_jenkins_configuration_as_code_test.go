@@ -2,7 +2,9 @@ package jenkins
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -46,6 +48,92 @@ resource jenkins_configuration_as_code test {
 			},
 		},
 	})
+}
+
+// TestAccJenkinsConfigurationAsCode_secretNotInState asserts the Q3 invariant
+// of docs/design/casc.md after out-of-band drift and after import (#249).
+// JCasC resolves ${decodeBase64:...} on apply, so the resolved value stands in
+// for a secret: the controller holds it, the configuration does not.
+func TestAccJenkinsConfigurationAsCode_secretNotInState(t *testing.T) {
+	resolved := "tf-acc-secret-" + acctest.RandStringFromCharSet(12, acctest.CharSetAlphaNum)
+	resourceName := "jenkins_configuration_as_code.test"
+	config := fmt.Sprintf(`
+resource jenkins_configuration_as_code test {
+  section = "jenkins"
+  yaml    = yamlencode({
+    systemMessage = "$${decodeBase64:%s}"
+    quietPeriod   = 5
+  })
+}`, base64.StdEncoding.EncodeToString([]byte(resolved)))
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCASCSectionContains("jenkins", resolved),
+					testAccCheckStateOmits(resolved),
+				),
+			},
+			{
+				// Drift on a sibling key: the refreshed yaml shows it, keeps the
+				// placeholder, and still differs from the configuration.
+				PreConfig: func() {
+					if err := testAccClient.ApplyCASC(context.Background(), "jenkins:\n  quietPeriod: 7\n"); err != nil {
+						t.Fatalf("inducing drift: %v", err)
+					}
+				},
+				RefreshState:       true,
+				ExpectNonEmptyPlan: true,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckStateOmits(resolved),
+					resource.TestMatchResourceAttr(resourceName, "yaml", regexp.MustCompile(`quietPeriod: 7`)),
+					resource.TestMatchResourceAttr(resourceName, "yaml", regexp.MustCompile(`\$\{decodeBase64:`)),
+				),
+			},
+			{
+				// Re-applying reconciles the drift.
+				Config: config,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckStateOmits(resolved),
+					testAccCheckCASCSectionContains("jenkins", "quietPeriod: 5"),
+				),
+			},
+			{
+				ResourceName:            resourceName,
+				ImportState:             true,
+				ImportStateVerify:       true,
+				ImportStateVerifyIgnore: []string{"yaml"},
+				ImportStateCheck: func(states []*terraform.InstanceState) error {
+					for _, s := range states {
+						for k, v := range s.Attributes {
+							if strings.Contains(v, resolved) {
+								return fmt.Errorf("imported attribute %s holds the resolved secret", k)
+							}
+						}
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+// testAccCheckStateOmits fails if any attribute of any resource in state
+// contains value.
+func testAccCheckStateOmits(value string) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		for name, rs := range s.RootModule().Resources {
+			for k, v := range rs.Primary.Attributes {
+				if strings.Contains(v, value) {
+					return fmt.Errorf("%s.%s holds %q", name, k, value)
+				}
+			}
+		}
+		return nil
+	}
 }
 
 // testAccCheckCASCSectionContains exports the live JCasC configuration and

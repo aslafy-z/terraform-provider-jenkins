@@ -1,6 +1,10 @@
 package jenkins
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 func TestIsSecretPlaceholder(t *testing.T) {
 	cases := map[string]struct {
@@ -228,6 +232,138 @@ security:
 
 	t.Run("invalid exported YAML errors", func(t *testing.T) {
 		if _, err := cascInSync("a: 1", "b: [bad\n", "jenkins"); err == nil {
+			t.Error("expected an error for malformed exported YAML")
+		}
+	})
+}
+
+func TestCASCDriftView(t *testing.T) {
+	marker := "'" + cascDriftMarker + "'"
+	cases := []struct {
+		name             string
+		declared, export string
+		want             string
+		wantNotContain   []string
+	}{
+		{
+			name:     "placeholder kept while a sibling drifts",
+			declared: "token: ${TOKEN}\nurl: http://a/\n",
+			export:   "s:\n  token: resolved-token\n  url: http://b/\n  extra: 1\n",
+			want:     "token: ${TOKEN}\nurl: http://b/\n",
+		},
+		{
+			name:     "declared key missing on the controller is dropped",
+			declared: "a: 1\nb: 2\n",
+			export:   "s:\n  a: 1\n",
+			want:     "a: 1\n",
+		},
+		{
+			name:     "declared scalar replaced by a mapping is hidden",
+			declared: "auth: none\n",
+			export:   "s:\n  auth:\n    password: resolved-pw\n",
+			want:     "auth: " + marker + "\n",
+		},
+		{
+			name:     "declared mapping replaced by a scalar is hidden",
+			declared: "auth:\n  user: u\n",
+			export:   "s:\n  auth: other\n",
+			want:     "auth: " + marker + "\n",
+		},
+		{
+			name:     "scalar sequence grows",
+			declared: "list: [a]\n",
+			export:   "s:\n  list: [a, b]\n",
+			want:     "list: [a, b]\n",
+		},
+		{
+			name:     "scalar sequence shrinks",
+			declared: "list: [a, b]\n",
+			export:   "s:\n  list: [b]\n",
+			want:     "list: [b]\n",
+		},
+		{
+			name:           "extra mapping element is hidden",
+			declared:       "list:\n  - name: a\n",
+			export:         "s:\n  list:\n    - name: a\n      x: 1\n    - name: b\n      password: resolved-pw\n",
+			want:           "list:\n  - name: a\n  - " + marker + "\n",
+			wantNotContain: []string{"resolved-pw"},
+		},
+		{
+			name:           "drifted sequence holding a placeholder is hidden whole",
+			declared:       "list:\n  - ${A}\n  - b\n",
+			export:         "s:\n  list: [b, resolved-a]\n",
+			want:           "list: " + marker + "\n",
+			wantNotContain: []string{"resolved-a"},
+		},
+		{
+			name:           "embedded interpolation is never copied",
+			declared:       "url: https://${USER}@host/\n",
+			export:         "s:\n  url: https://resolved-user@host/\n",
+			want:           "url: " + marker + "\n",
+			wantNotContain: []string{"resolved-user"},
+		},
+		{
+			name:     "empty declared document is hidden",
+			declared: "",
+			export:   "s:\n  a: 1\n",
+			want:     marker + "\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			view, found, err := cascDriftView(tc.declared, tc.export, "s")
+			if err != nil || !found {
+				t.Fatalf("found=%v err=%v", found, err)
+			}
+			got, want := mustParseYAML(t, view), mustParseYAML(t, tc.want)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("view mismatch:\n got: %s\nwant: %s", view, tc.want)
+			}
+			for _, s := range tc.wantNotContain {
+				if strings.Contains(view, s) {
+					t.Errorf("view contains %q:\n%s", s, view)
+				}
+			}
+
+			// A drift view must still report drift, or the plan would show no
+			// diff, and refreshing it again must not change it.
+			inSync, err := cascInSync(tc.declared, tc.export, "s")
+			if err != nil || inSync {
+				t.Fatalf("test case is not drifted: inSync=%v err=%v", inSync, err)
+			}
+			if reflect.DeepEqual(got, mustParseYAML(t, tc.declared)) {
+				t.Errorf("view equals the declared document under drift:\n%s", view)
+			}
+			again := view
+			if ok, _ := cascInSync(view, tc.export, "s"); !ok {
+				again, _, _ = cascDriftView(view, tc.export, "s")
+			}
+			if !reflect.DeepEqual(mustParseYAML(t, again), got) {
+				t.Errorf("refreshing the view changed it:\n first: %s\nsecond: %s", view, again)
+			}
+			for _, s := range tc.wantNotContain {
+				if strings.Contains(again, s) {
+					t.Errorf("refreshed view contains %q:\n%s", s, again)
+				}
+			}
+		})
+	}
+
+	t.Run("absent section", func(t *testing.T) {
+		_, found, err := cascDriftView("a: 1", "other:\n  a: 1\n", "s")
+		if err != nil || found {
+			t.Errorf("found=%v err=%v, want found=false", found, err)
+		}
+	})
+
+	t.Run("invalid declared YAML errors", func(t *testing.T) {
+		if _, _, err := cascDriftView("a: [bad\n", "s:\n  a: 1\n", "s"); err == nil {
+			t.Error("expected an error for malformed declared YAML")
+		}
+	})
+
+	t.Run("invalid exported YAML errors", func(t *testing.T) {
+		if _, _, err := cascDriftView("a: 1", "s: [bad\n", "s"); err == nil {
 			t.Error("expected an error for malformed exported YAML")
 		}
 	})
