@@ -316,6 +316,13 @@ func TestCovM_RoleUpdateOverwrite(t *testing.T) {
 			plan:  model("team/.*", build, strs("bob")),
 		},
 		{
+			// ".*" is what rolePatternPlanModifier plans for an item role
+			// without a configured pattern.
+			name:  "unset pattern, entries only",
+			prior: model(".*", build, strs("alice")),
+			plan:  model(".*", build, strs("bob")),
+		},
+		{
 			name:          "permissions change",
 			prior:         model("team/.*", build, strs("alice")),
 			plan:          model("team/.*", read, strs("alice")),
