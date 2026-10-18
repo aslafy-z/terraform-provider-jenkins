@@ -2,6 +2,7 @@ package jenkins
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -118,6 +119,32 @@ func TestCovM_Role(t *testing.T) {
 	rExists.Create(ctx, resource.CreateRequest{Plan: existsPlan}, &existsResp)
 	if !existsResp.Diagnostics.HasError() || adopted {
 		t.Errorf("role Create on an existing role: diags=%v, modified=%v; want an error and no change", existsResp.Diagnostics, adopted)
+	}
+
+	// role-strategy allows a role with entries but no permissions, and getRole
+	// answers "permissionIds":{} for it but {} for a missing role. Create must
+	// treat it as existing, and Read must keep it in state.
+	zeroPerms := func(_ context.Context, _, _ string, out interface{}) error {
+		return json.Unmarshal([]byte(`{"permissionIds":{},"sids":[{"type":"USER","sid":"bob"}]}`), out)
+	}
+	var stripped bool
+	rZero := &roleResource{resourceHelper: &resourceHelper{client: &mockJenkinsClient{
+		mockGetRole:      zeroPerms,
+		mockAddRole:      func(context.Context, string, string, []string, string, bool) error { stripped = true; return nil },
+		mockUnassignRole: func(context.Context, string, string, roleEntry) error { stripped = true; return nil },
+		mockRemoveRole:   func(context.Context, string, string) error { stripped = true; return nil },
+	}}}
+	zeroResp := resource.CreateResponse{State: tfsdk.State{Schema: s}}
+	rZero.Create(ctx, resource.CreateRequest{Plan: existsPlan}, &zeroResp)
+	if !zeroResp.Diagnostics.HasError() || stripped {
+		t.Errorf("role Create on an existing zero-permission role: diags=%v, modified=%v; want an error and no change", zeroResp.Diagnostics, stripped)
+	}
+	zeroState := tfsdk.State{Schema: s}
+	zeroState.Set(ctx, model)
+	zeroRead := resource.ReadResponse{State: zeroState}
+	rZero.Read(ctx, resource.ReadRequest{State: zeroState}, &zeroRead)
+	if zeroRead.Diagnostics.HasError() || zeroRead.State.Raw.IsNull() {
+		t.Errorf("role Read of a zero-permission role: diags=%v, removed=%v; want it kept", zeroRead.Diagnostics, zeroRead.State.Raw.IsNull())
 	}
 
 	// Create stops when the existence check itself fails.

@@ -42,7 +42,8 @@ type roleEntry struct {
 }
 
 // roleStrategyRoleResponse models the JSON returned by the role-strategy
-// getRole endpoint. A missing role yields an empty object (nil PermissionIDs).
+// getRole endpoint. A missing role yields an empty object (nil PermissionIDs);
+// a role with no permissions yields an empty, non-nil map.
 type roleStrategyRoleResponse struct {
 	PermissionIDs map[string]bool `json:"permissionIds"`
 	Pattern       string          `json:"pattern"`
@@ -180,7 +181,7 @@ func (r *roleResource) Create(ctx context.Context, req resource.CreateRequest, r
 		resp.Diagnostics.AddError("Unable to Create Resource", "Could not check whether role "+data.Name.ValueString()+" exists.\n\nError: "+err.Error())
 		return
 	}
-	if len(existing.PermissionIDs) != 0 {
+	if existing.PermissionIDs != nil {
 		resp.Diagnostics.AddError("Role Already Exists",
 			"The "+data.Type.ValueString()+" role "+data.Name.ValueString()+" already exists. Import it with the identifier \""+data.Type.ValueString()+"/"+data.Name.ValueString()+"\" to manage it.")
 		return
@@ -427,7 +428,7 @@ func (r *roleResource) populate(ctx context.Context, data *roleResourceModel, di
 		diags.AddError("Unable to Refresh Resource", "Could not read role "+data.Name.ValueString()+".\n\nError: "+err.Error())
 		return false
 	}
-	if len(role.PermissionIDs) == 0 {
+	if role.PermissionIDs == nil {
 		return false
 	}
 
