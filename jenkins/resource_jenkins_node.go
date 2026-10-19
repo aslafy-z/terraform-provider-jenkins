@@ -2,13 +2,16 @@ package jenkins
 
 import (
 	"context"
+	"regexp"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -25,28 +28,14 @@ type nodeResourceModel struct {
 	RemoteFS     types.String `tfsdk:"remote_fs"`
 	Labels       types.String `tfsdk:"labels"`
 	Mode         types.String `tfsdk:"mode"`
+	WebSocket    types.Bool   `tfsdk:"web_socket"`
+
+	JobRestriction *nodeJobRestrictionModel `tfsdk:"job_restriction"`
 }
 
-// nodeConfig maps the subset of a node's config.xml that this resource manages.
-// It intentionally omits XMLName so it decodes regardless of the root element
-// name (e.g. <slave>), which varies by node type.
-type nodeConfig struct {
-	Name         string `xml:"name"`
-	Description  string `xml:"description"`
-	RemoteFS     string `xml:"remoteFS"`
-	NumExecutors int64  `xml:"numExecutors"`
-	Label        string `xml:"label"`
-	Mode         string `xml:"mode"`
-}
-
-// mode returns the node usage, falling back to NORMAL (Jenkins' own default)
-// when config.xml has no <mode> element, so Read agrees with the schema
-// default instead of planning a replacement.
-func (c nodeConfig) mode() string {
-	if c.Mode == "" {
-		return "NORMAL"
-	}
-	return c.Mode
+type nodeJobRestrictionModel struct {
+	Regex          types.String `tfsdk:"regex"`
+	CheckShortName types.Bool   `tfsdk:"check_short_name"`
 }
 
 type nodeResource struct {
@@ -69,12 +58,14 @@ func (r *nodeResource) Metadata(_ context.Context, req resource.MetadataRequest,
 func (r *nodeResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: `
-Manages a permanent (static) agent node within Jenkins, launched as an inbound (JNLP) agent.
+Manages a permanent (static) agent node within Jenkins, launched as an inbound agent.
 
-Nodes are immutable: because Jenkins exposes no in-place update for a node's core
-configuration, changing any attribute replaces the node. Use ` + "`num_executors`, `labels`" + ` and
-the rest to describe the agent as code; connect the agent out-of-band with the inbound
-(JNLP) secret Jenkins issues for it, which the ` + "`jenkins_node_secret`" + ` data source reads.`,
+Changing ` + "`name`" + ` replaces the node. Every other attribute is updated in place through the
+node's ` + "`config.xml`" + `, and a connected agent stays connected. A connected agent picks up a
+new ` + "`remote_fs`" + ` or ` + "`web_socket`" + ` only when it next connects. Settings the resource does not
+manage, such as other node properties or the agent's work directory options, keep the values
+they have on the controller. Connect the agent out-of-band with the secret Jenkins issues for
+it, which the ` + "`jenkins_node_secret`" + ` data source reads.`,
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -94,46 +85,67 @@ the rest to describe the agent as code; connect the agent out-of-band with the i
 				Optional:            true,
 				Computed:            true,
 				Default:             int64default.StaticInt64(1),
-				MarkdownDescription: "The number of concurrent builds the node can run. Defaults to `1`. Changing this forces a new node to be created.",
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.RequiresReplace(),
+				MarkdownDescription: "The number of concurrent builds the node can run, at least `1`. Defaults to `1`.",
+				// Jenkins accepts 0 but then drops the node's computer, and
+				// with it /computer/<name>/: the node would leave state on the
+				// next refresh while staying on the controller.
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
 				},
 			},
 			"description": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
 				Default:             stringdefault.StaticString(""),
-				MarkdownDescription: "A human readable description of the node. Changing this forces a new node to be created.",
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
+				MarkdownDescription: "A human readable description of the node.",
 			},
 			"remote_fs": schema.StringAttribute{
 				Required:            true,
-				MarkdownDescription: "The absolute path to the agent's root/working directory on the agent machine (e.g. `/home/jenkins/agent`). Changing this forces a new node to be created.",
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
-				},
+				MarkdownDescription: "The absolute path to the agent's root/working directory on the agent machine (e.g. `/home/jenkins/agent`). A connected agent keeps using the previous path until it reconnects.",
 			},
 			"labels": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
 				Default:             stringdefault.StaticString(""),
-				MarkdownDescription: "A space-separated list of labels used to target the node from job configurations. Changing this forces a new node to be created.",
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+				MarkdownDescription: "A space-separated list of labels used to target the node from job configurations, with no leading or trailing whitespace.",
+				// Jenkins trims the label string it stores, so a padded value
+				// would differ from state on every plan.
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(regexp.MustCompile(`^(\S(.*\S)?)?$`), "must not have leading or trailing whitespace"),
 				},
 			},
 			"mode": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
 				Default:             stringdefault.StaticString("NORMAL"),
-				MarkdownDescription: "How Jenkins schedules builds on the node: `NORMAL` (the default) uses the node as much as possible, including for jobs with no label; `EXCLUSIVE` only builds jobs whose label expression matches the node. Changing this forces a new node to be created.",
+				MarkdownDescription: "How Jenkins schedules builds on the node: `NORMAL` (the default) uses the node as much as possible, including for jobs with no label; `EXCLUSIVE` only builds jobs whose label expression matches the node.",
 				Validators: []validator.String{
 					stringvalidator.OneOf("NORMAL", "EXCLUSIVE"),
 				},
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
+			},
+			"web_socket": schema.BoolAttribute{
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
+				MarkdownDescription: "The *Use WebSocket* option of the inbound launcher: the agent connects over WebSocket through the controller's HTTP(S) port instead of the TCP agent port. Jenkins hands it to agents that read their launch arguments from the controller; an agent started with `-webSocket` connects over WebSocket whatever this is set to. A connected agent keeps its current transport until it reconnects. Defaults to `false`.",
+			},
+			"job_restriction": schema.SingleNestedAttribute{
+				Optional:            true,
+				MarkdownDescription: "Restricts the node to the jobs whose name matches a regular expression: the node refuses every other build, whatever labels it carries. Needs the Job Restrictions plugin (`job-restrictions`) on the controller. Removing the attribute removes the restriction. A restriction of another type set in the UI is not read, and is replaced when this attribute is set.",
+				Attributes: map[string]schema.Attribute{
+					"regex": schema.StringAttribute{
+						Required:            true,
+						MarkdownDescription: "Java regular expression the full name of the job (folders included) must match. The plugin accepts every job when the expression does not compile.",
+						Validators: []validator.String{
+							stringvalidator.LengthAtLeast(1),
+						},
+					},
+					"check_short_name": schema.BoolAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+						MarkdownDescription: "The plugin's *Check short name* option. Defaults to `false`. Job Restrictions `242.v6edda_c9e4ca_f` stores it but matches the full name either way.",
+					},
 				},
 			},
 		},
@@ -168,6 +180,27 @@ func (r *nodeResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	data.ID = data.Name
 
+	// doCreateItem sets every other attribute. The node properties and the
+	// launcher's WebSocket flag need the node's config.xml.
+	if data.JobRestriction != nil || data.WebSocket.ValueBool() {
+		saved, diags := r.writeConfig(ctx, data)
+		if diags.HasError() {
+			resp.Diagnostics.Append(diags...)
+			// Deleting the half-configured node lets the next apply simply
+			// create it again. Should the delete fail too, the node is
+			// saved instead, tainted, so it is not orphaned on the controller.
+			if _, err := r.client.DeleteNode(ctx, data.Name.ValueString()); err != nil {
+				resp.Diagnostics.AddError(
+					"Unable to Delete Partially Created Node",
+					"Node "+data.Name.ValueString()+" was created but could not be configured, and deleting it failed. It is kept in state as tainted and will be replaced on the next apply.\n\nError: "+err.Error(),
+				)
+				resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			}
+			return
+		}
+		data.fromConfig(saved)
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -194,17 +227,11 @@ func (r *nodeResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	data.ID = data.Name
-	data.NumExecutors = types.Int64Value(cfg.NumExecutors)
-	data.Description = types.StringValue(cfg.Description)
-	data.RemoteFS = types.StringValue(cfg.RemoteFS)
-	data.Labels = types.StringValue(cfg.Label)
-	data.Mode = types.StringValue(cfg.mode())
+	data.fromConfig(cfg)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
-// Update should never run: every configurable attribute is RequiresReplace and
-// Jenkins has no in-place node update. It persists the plan defensively.
 func (r *nodeResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	tflog.Debug(ctx, "nodeResource.Update")
 	var data nodeResourceModel
@@ -212,8 +239,85 @@ func (r *nodeResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	saved, diags := r.writeConfig(ctx, data)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	data.ID = data.Name
+	data.fromConfig(saved)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+}
+
+// writeConfig applies the planned attributes to the node's config.xml with a
+// read-modify-write, so what the resource does not manage keeps its value,
+// and returns the configuration Jenkins saved. Jenkins swaps the rebuilt node
+// in place: a connected agent stays connected.
+func (r *nodeResource) writeConfig(ctx context.Context, data nodeResourceModel) (nodeConfig, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	name := data.Name.ValueString()
+	fail := func(action string, err error) (nodeConfig, diag.Diagnostics) {
+		diags.AddError(
+			"Unable to Update Node Configuration",
+			"An unexpected error occurred while "+action+" the configuration of node "+name+".\n\nError: "+err.Error(),
+		)
+		return nodeConfig{}, diags
+	}
+
+	var cfg nodeConfig
+	if err := r.client.GetNodeConfig(ctx, name, &cfg); err != nil {
+		return fail("reading", err)
+	}
+	if err := cfg.apply(data); err != nil {
+		return fail("preparing", err)
+	}
+	doc, err := cfg.render()
+	if err != nil {
+		return fail("preparing", err)
+	}
+	if err := r.client.UpdateNodeConfig(ctx, name, doc); err != nil {
+		return fail("writing", err)
+	}
+
+	// Jenkins answers 200 even when it drops what it cannot load: a property
+	// whose plugin is missing, or a launcher field older cores do not know.
+	var saved nodeConfig
+	if err := r.client.GetNodeConfig(ctx, name, &saved); err != nil {
+		return fail("reading back", err)
+	}
+	if data.JobRestriction != nil && saved.jobRestriction() == nil {
+		diags.AddError(
+			"Unable to Update Node Configuration",
+			"Jenkins did not keep the job restriction of node "+name+". The Job Restrictions plugin (job-restrictions) must be installed on the controller.",
+		)
+	}
+	if data.WebSocket.ValueBool() && !saved.webSocket() {
+		diags.AddError(
+			"Unable to Update Node Configuration",
+			"Jenkins did not keep the WebSocket option of node "+name+". It needs Jenkins 2.217 or later.",
+		)
+	}
+	return saved, diags
+}
+
+// fromConfig fills the attributes the resource manages from a node's
+// config.xml.
+func (data *nodeResourceModel) fromConfig(cfg nodeConfig) {
+	data.NumExecutors = types.Int64Value(cfg.NumExecutors)
+	data.Description = types.StringValue(cfg.Description)
+	data.RemoteFS = types.StringValue(cfg.RemoteFS)
+	data.Labels = types.StringValue(cfg.Label)
+	data.Mode = types.StringValue(cfg.mode())
+	data.WebSocket = types.BoolValue(cfg.webSocket())
+	data.JobRestriction = nil
+	if jr := cfg.jobRestriction(); jr != nil {
+		data.JobRestriction = &nodeJobRestrictionModel{
+			Regex:          types.StringValue(jr.Regex),
+			CheckShortName: types.BoolValue(jr.CheckShortName),
+		}
+	}
 }
 
 func (r *nodeResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
