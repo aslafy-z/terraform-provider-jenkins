@@ -2,7 +2,12 @@ package jenkins
 
 import (
 	"context"
+	"errors"
+	"sort"
+	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -11,14 +16,17 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 )
 
 type configurationAsCodeResourceModel struct {
-	ID      types.String `tfsdk:"id"`
-	Section types.String `tfsdk:"section"`
-	YAML    types.String `tfsdk:"yaml"`
+	ID               types.String `tfsdk:"id"`
+	Section          types.String `tfsdk:"section"`
+	YAML             types.String `tfsdk:"yaml"`
+	SecretsWo        types.Map    `tfsdk:"secrets_wo"`
+	SecretsWoVersion types.String `tfsdk:"secrets_wo_version"`
 }
 
 type configurationAsCodeResource struct {
@@ -27,6 +35,8 @@ type configurationAsCodeResource struct {
 
 var _ resource.ResourceWithConfigure = &configurationAsCodeResource{}
 var _ resource.ResourceWithImportState = &configurationAsCodeResource{}
+var _ resource.ResourceWithConfigValidators = &configurationAsCodeResource{}
+var _ resource.ResourceWithValidateConfig = &configurationAsCodeResource{}
 
 func newConfigurationAsCodeResource() resource.Resource {
 	return &configurationAsCodeResource{
@@ -47,7 +57,7 @@ Each instance owns a single top-level JCasC section (` + "`jenkins`, `security`,
 Key behaviours:
 
 - **Merge, not replace.** Applying a section merges the declared keys into the running configuration; keys present on the controller but not in ` + "`yaml`" + ` are left untouched. Drift is detected as a *subset*: only keys you declare are compared.
-- **Secrets.** Use JCasC ` + "`${VAR}`" + ` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.
+- **Secrets.** Use JCasC ` + "`${VAR}`" + ` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared. A ` + "`${name}`" + ` naming a key of the write-only ` + "`secrets_wo`" + ` map is replaced by the provider instead, just before the configuration is sent, so a secret held by Terraform needs no secret source on the controller.
 - **Drift.** When a declared key drifts, state keeps only the declared keys: ` + "`${VAR}`" + ` placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as ` + "`" + cascDriftMarker + "`" + ` instead.
 - **Import.** Import records only ` + "`section`" + `; ` + "`yaml`" + ` is not read from the controller, so the first apply after import re-applies the configured document.
 - **Delete is best-effort.** JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
@@ -74,9 +84,63 @@ Requires the ` + "`configuration-as-code`" + ` plugin and an account with ` + "`
 			},
 			"yaml": schema.StringAttribute{
 				Required:            true,
-				MarkdownDescription: "The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation.",
+				MarkdownDescription: "The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation, or `${name}` for a key of `secrets_wo`.",
+			},
+			"secrets_wo": schema.MapAttribute{
+				ElementType: types.StringType,
+				Optional:    true,
+				Sensitive:   true,
+				WriteOnly:   true,
+				MarkdownDescription: "Secret values substituted into `yaml` by the provider, keyed by name: every `${name}` expression in a string of `yaml` is replaced by the value of `name` just before the section is sent to the controller. " +
+					"Write-only: the values are **never stored in Terraform state or plan**, and `yaml` keeps the `${name}` form, which drift detection compares as a placeholder when it is the whole value. " +
+					"Embedded in a longer string (`https://user:${name}@host/`) it never equals what the controller exports, so the section plans a change on every run. " +
+					"Only exactly `${name}` is replaced, also nested as in `${decodeBase64:${name}}`; any other `${...}`, and `^${name}` (JCasC's escape for a literal), is left for JCasC. A `${` inside a value is sent escaped, so JCasC does not resolve it. " +
+					"A value nested in another expression must not hold `$`, `{`, `}` or `^`, and a value must not end with `^` right before another expression: JCasC syntax has no escape for either, so the apply fails. " +
+					"Every key must be referenced in `yaml`. Requires Terraform >= 1.11 and must be paired with `secrets_wo_version`.",
+				Validators: []validator.Map{
+					mapvalidator.KeysAre(stringvalidator.RegexMatches(reCASCSecretName, "must start with a letter or '_' and hold only letters, digits, '_', '.' or '-'")),
+				},
+			},
+			"secrets_wo_version": schema.StringAttribute{
+				Optional:            true,
+				MarkdownDescription: "Version identifier for `secrets_wo`. Because write-only values are not stored in state, Terraform cannot detect when they change; change this value (e.g. after rotating a secret) to have Terraform re-apply the section with the new values. Required when `secrets_wo` is set.",
 			},
 		},
+	}
+}
+
+// ConfigValidators pairs secrets_wo with its version trigger.
+func (r *configurationAsCodeResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		resourcevalidator.RequiredTogether(path.MatchRoot("secrets_wo"), path.MatchRoot("secrets_wo_version")),
+	}
+}
+
+// ValidateConfig rejects a secrets_wo key that yaml never references, once
+// both are known.
+func (r *configurationAsCodeResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var data configurationAsCodeResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if data.YAML.IsUnknown() || data.YAML.IsNull() || data.SecretsWo.IsUnknown() || data.SecretsWo.IsNull() {
+		return
+	}
+	checkSecretsReferenced(data.YAML.ValueString(), data.SecretsWo.Elements(), &resp.Diagnostics)
+}
+
+// checkSecretsReferenced adds an error naming the secrets_wo keys that no
+// ${name} expression in yaml refers to.
+func checkSecretsReferenced[V any](yaml string, secrets map[string]V, diags *diag.Diagnostics) {
+	unused, err := unreferencedSecrets(yaml, secrets)
+	if err != nil {
+		diags.AddAttributeError(path.Root("yaml"), "Invalid YAML", err.Error())
+		return
+	}
+	if len(unused) > 0 {
+		diags.AddAttributeError(path.Root("secrets_wo"), "Unreferenced Secret",
+			"No ${name} expression in yaml refers to: "+strings.Join(unused, ", ")+". Their values would never be applied.")
 	}
 }
 
@@ -89,7 +153,7 @@ func (r *configurationAsCodeResource) Create(ctx context.Context, req resource.C
 		return
 	}
 
-	if !r.apply(ctx, &data, &resp.Diagnostics) {
+	if !r.apply(ctx, req.Config, &data, &resp.Diagnostics) {
 		return
 	}
 
@@ -154,7 +218,7 @@ func (r *configurationAsCodeResource) Update(ctx context.Context, req resource.U
 		return
 	}
 
-	if !r.apply(ctx, &data, &resp.Diagnostics) {
+	if !r.apply(ctx, req.Config, &data, &resp.Diagnostics) {
 		return
 	}
 
@@ -205,17 +269,64 @@ func (r *configurationAsCodeResource) ImportState(ctx context.Context, req resou
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), section)...)
 }
 
-// apply wraps the declared subtree in its section key and POSTs it to JCasC.
-// Returns false (with a diagnostic) on failure.
-func (r *configurationAsCodeResource) apply(ctx context.Context, data *configurationAsCodeResourceModel, diags *diag.Diagnostics) bool {
-	doc, err := wrapSection(data.Section.ValueString(), data.YAML.ValueString())
+// apply wraps the declared subtree in its section key, substitutes the
+// write-only secrets read from config, and POSTs it to JCasC. Write-only values
+// are absent from plan and state, so they come from config, where they are
+// available on every apply. Returns false (with a diagnostic) on failure.
+func (r *configurationAsCodeResource) apply(ctx context.Context, config tfsdk.Config, data *configurationAsCodeResourceModel, diags *diag.Diagnostics) bool {
+	var secretsWo types.Map
+	diags.Append(config.GetAttribute(ctx, path.Root("secrets_wo"), &secretsWo)...)
+	if diags.HasError() {
+		return false
+	}
+	var secrets map[string]string
+	if !secretsWo.IsNull() {
+		diags.Append(secretsWo.ElementsAs(ctx, &secrets, false)...)
+		if diags.HasError() {
+			return false
+		}
+	}
+	// ValidateConfig skips this check while yaml or secrets_wo is unknown.
+	if len(secrets) > 0 {
+		checkSecretsReferenced(data.YAML.ValueString(), secrets, diags)
+		if diags.HasError() {
+			return false
+		}
+	}
+
+	doc, err := wrapSection(data.Section.ValueString(), data.YAML.ValueString(), secrets)
+	if errors.Is(err, errCASCSecretValue) {
+		diags.AddAttributeError(path.Root("secrets_wo"), "Invalid Secret Value", err.Error())
+		return false
+	}
 	if err != nil {
 		diags.AddAttributeError(path.Root("yaml"), "Invalid YAML", err.Error())
 		return false
 	}
 	if err := r.client.ApplyCASC(ctx, doc); err != nil {
-		diags.AddError("Unable to Apply Configuration", "JCasC rejected the configuration for section "+data.Section.ValueString()+".\n\nError: "+err.Error())
+		diags.AddError("Unable to Apply Configuration", "JCasC rejected the configuration for section "+data.Section.ValueString()+".\n\nError: "+redactCASCSecrets(err.Error(), secrets))
 		return false
 	}
 	return true
+}
+
+// redactCASCSecrets hides the secrets_wo values in msg: the document posted to
+// JCasC holds them in clear, and its error can quote what it was given.
+// Longer values are matched first, so one holding another is hidden whole.
+func redactCASCSecrets(msg string, secrets map[string]string) string {
+	var values []string
+	for _, v := range secrets {
+		if v != "" {
+			values = append(values, v)
+		}
+	}
+	if len(values) == 0 {
+		return msg
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	pairs := make([]string, 0, 2*len(values))
+	for _, v := range values {
+		pairs = append(pairs, v, "(sensitive value)")
+	}
+	return strings.NewReplacer(pairs...).Replace(msg)
 }

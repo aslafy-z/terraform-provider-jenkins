@@ -6,7 +6,7 @@ description: |-
   Manages one top-level section of the controller configuration through the configuration-as-code (JCasC) plugin.
   Each instance owns a single top-level JCasC section (jenkins, security, unclassified, tool, ...) named by section, and applies the yaml subtree for it. See the design notes https://github.com/namecheap/terraform-provider-jenkins/blob/main/docs/design/casc.md for the full model.
   Key behaviours:
-  Merge, not replace. Applying a section merges the declared keys into the running configuration; keys present on the controller but not in yaml are left untouched. Drift is detected as a subset: only keys you declare are compared.Secrets. Use JCasC ${VAR} interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.Drift. When a declared key drifts, state keeps only the declared keys: ${VAR} placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as <drifted: controller value hidden> instead.Import. Import records only section; yaml is not read from the controller, so the first apply after import re-applies the configured document.Delete is best-effort. JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
+  Merge, not replace. Applying a section merges the declared keys into the running configuration; keys present on the controller but not in yaml are left untouched. Drift is detected as a subset: only keys you declare are compared.Secrets. Use JCasC ${VAR} interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared. A ${name} naming a key of the write-only secrets_wo map is replaced by the provider instead, just before the configuration is sent, so a secret held by Terraform needs no secret source on the controller.Drift. When a declared key drifts, state keeps only the declared keys: ${VAR} placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as <drifted: controller value hidden> instead.Import. Import records only section; yaml is not read from the controller, so the first apply after import re-applies the configured document.Delete is best-effort. JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
   Requires the configuration-as-code plugin and an account with Overall/Administer.
 ---
 
@@ -19,7 +19,7 @@ Each instance owns a single top-level JCasC section (`jenkins`, `security`, `unc
 Key behaviours:
 
 - **Merge, not replace.** Applying a section merges the declared keys into the running configuration; keys present on the controller but not in `yaml` are left untouched. Drift is detected as a *subset*: only keys you declare are compared.
-- **Secrets.** Use JCasC `${VAR}` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.
+- **Secrets.** Use JCasC `${VAR}` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared. A `${name}` naming a key of the write-only `secrets_wo` map is replaced by the provider instead, just before the configuration is sent, so a secret held by Terraform needs no secret source on the controller.
 - **Drift.** When a declared key drifts, state keeps only the declared keys: `${VAR}` placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as `<drifted: controller value hidden>` instead.
 - **Import.** Import records only `section`; `yaml` is not read from the controller, so the first apply after import re-applies the configured document.
 - **Delete is best-effort.** JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
@@ -29,12 +29,33 @@ Requires the `configuration-as-code` plugin and an account with `Overall/Adminis
 ## Example Usage
 
 ```terraform
-# Manage the controller's system message (a safe first step for JCasC adoption).
-resource "jenkins_configuration_as_code" "system_message" {
+# Manage the jenkins section. The system message alone is a safe first step for
+# JCasC adoption; later jenkins settings go into this same resource, since one
+# instance owns a whole top-level section.
+#
+# clientSecret is held by Terraform rather than by a secret source on the
+# controller: the provider replaces ${client_secret} with the write-only value
+# just before sending the section, and state keeps the placeholder. Change
+# secrets_wo_version to re-send a rotated value.
+resource "jenkins_configuration_as_code" "jenkins" {
   section = "jenkins"
   yaml = yamlencode({
-    systemMessage = "Managed by Terraform — do not edit in the UI."
+    systemMessage = "Managed by Terraform: do not edit in the UI."
+    securityRealm = {
+      oic = {
+        clientId     = "jenkins"
+        clientSecret = "$${client_secret}"
+        serverConfiguration = {
+          wellKnown = {
+            wellKnownOpenIDConfigurationUrl = "https://sso.example.com/.well-known/openid-configuration"
+          }
+        }
+      }
+    }
   })
+
+  secrets_wo         = { client_secret = var.oidc_client_secret }
+  secrets_wo_version = "1"
 }
 
 # A second instance can own a different top-level section. Secrets use JCasC
@@ -62,7 +83,14 @@ resource "jenkins_configuration_as_code" "unclassified" {
 ### Required
 
 - `section` (String) The top-level JCasC configuration section this resource manages, e.g. `jenkins`, `security`, `unclassified`, or `tool`. Changing it forces replacement.
-- `yaml` (String) The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation.
+- `yaml` (String) The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation, or `${name}` for a key of `secrets_wo`.
+
+### Optional
+
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `secrets_wo` (Map of String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Secret values substituted into `yaml` by the provider, keyed by name: every `${name}` expression in a string of `yaml` is replaced by the value of `name` just before the section is sent to the controller. Write-only: the values are **never stored in Terraform state or plan**, and `yaml` keeps the `${name}` form, which drift detection compares as a placeholder when it is the whole value. Embedded in a longer string (`https://user:${name}@host/`) it never equals what the controller exports, so the section plans a change on every run. Only exactly `${name}` is replaced, also nested as in `${decodeBase64:${name}}`; any other `${...}`, and `^${name}` (JCasC's escape for a literal), is left for JCasC. A `${` inside a value is sent escaped, so JCasC does not resolve it. A value nested in another expression must not hold `$`, `{`, `}` or `^`, and a value must not end with `^` right before another expression: JCasC syntax has no escape for either, so the apply fails. Every key must be referenced in `yaml`. Requires Terraform >= 1.11 and must be paired with `secrets_wo_version`.
+- `secrets_wo_version` (String) Version identifier for `secrets_wo`. Because write-only values are not stored in state, Terraform cannot detect when they change; change this value (e.g. after rotating a secret) to have Terraform re-apply the section with the new values. Required when `secrets_wo` is set.
 
 ### Read-Only
 
@@ -79,5 +107,5 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 # Only the section is imported: yaml is not read back from the controller, since
 # the export holds resolved secrets and keys this resource does not manage. The
 # first apply after import re-applies the configured yaml.
-terraform import jenkins_configuration_as_code.system_message jenkins
+terraform import jenkins_configuration_as_code.jenkins jenkins
 ```
