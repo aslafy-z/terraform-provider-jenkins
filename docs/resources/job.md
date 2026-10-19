@@ -68,7 +68,7 @@ And in `pipeline.xml`:
 ### Required
 
 - `name` (String) The unique name of the JenkinsCI job.
-- `template` (String) The Jenkins-compatible XML template describing the job. An existing job's XML can be retrieved by appending `/config.xml` to its URL. Rendered as a Go template with the other resource arguments available as variables; do not include the XML prolog. Well-formedness is validated at plan time, and semantically-equivalent XML (differing only in attribute order, empty-element syntax, whitespace, plugin versions, or the XML declaration) does not produce a diff.
+- `template` (String) The Jenkins-compatible XML template describing the job. An existing job's XML can be retrieved by appending `/config.xml` to its URL. Rendered as a Go template with the other resource arguments available as variables; do not include the XML prolog. Well-formedness is validated at plan time, and semantically-equivalent XML (differing only in attribute order, empty-element syntax, whitespace, plugin versions, or the XML declaration) does not produce a diff. Elements a plugin writes into config.xml on its own, such as the projects a GitLab organization folder scan records (`navigatorProjects`), are left out of the comparison and of state.
 
 ### Optional
 
