@@ -6,7 +6,7 @@ description: |-
   Manages one top-level section of the controller configuration through the configuration-as-code (JCasC) plugin.
   Each instance owns a single top-level JCasC section (jenkins, security, unclassified, tool, ...) named by section, and applies the yaml subtree for it. See the design notes https://github.com/namecheap/terraform-provider-jenkins/blob/main/docs/design/casc.md for the full model.
   Key behaviours:
-  Merge, not replace. Applying a section merges the declared keys into the running configuration; keys present on the controller but not in yaml are left untouched. Drift is detected as a subset: only keys you declare are compared.Secrets. Use JCasC ${VAR} interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.Drift. When a declared key drifts, state keeps only the declared keys: ${VAR} placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as <drifted: controller value hidden> instead.Import. Import records only section; yaml is not read from the controller, so the first apply after import re-applies the configured document.Delete is best-effort. JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
+  Merge, not replace. Applying a section merges the declared keys into the running configuration; keys present on the controller but not in yaml are left untouched. Drift is detected as a subset: only keys you declare are compared.Secrets. Use JCasC ${VAR} interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared. A ${name} naming a key of the write-only secrets_wo map is replaced by the provider instead, just before the configuration is sent, so a secret held by Terraform needs no secret source on the controller.Sequences. Lists compare in order and by length, since JCasC list configurators replace the list. unordered_paths opts a list into an order-insensitive comparison, for lists the controller exports in an order of its own.Drift. When a declared key drifts, state keeps only the declared keys: ${VAR} placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as <drifted: controller value hidden> instead.Import. Import records only section; yaml is not read from the controller, so the first apply after import re-applies the configured document.Delete is best-effort. JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
   Requires the configuration-as-code plugin and an account with Overall/Administer.
 ---
 
@@ -19,7 +19,8 @@ Each instance owns a single top-level JCasC section (`jenkins`, `security`, `unc
 Key behaviours:
 
 - **Merge, not replace.** Applying a section merges the declared keys into the running configuration; keys present on the controller but not in `yaml` are left untouched. Drift is detected as a *subset*: only keys you declare are compared.
-- **Secrets.** Use JCasC `${VAR}` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared.
+- **Secrets.** Use JCasC `${VAR}` interpolation for secret values; they are resolved by the controller at apply time and never stored in state or compared. A `${name}` naming a key of the write-only `secrets_wo` map is replaced by the provider instead, just before the configuration is sent, so a secret held by Terraform needs no secret source on the controller.
+- **Sequences.** Lists compare in order and by length, since JCasC list configurators replace the list. `unordered_paths` opts a list into an order-insensitive comparison, for lists the controller exports in an order of its own.
 - **Drift.** When a declared key drifts, state keeps only the declared keys: `${VAR}` placeholders stay as written and drifted plain values show the controller's value. A value that could carry a resolved secret or unmanaged keys is shown as `<drifted: controller value hidden>` instead.
 - **Import.** Import records only `section`; `yaml` is not read from the controller, so the first apply after import re-applies the configured document.
 - **Delete is best-effort.** JCasC cannot "unset" configuration, so destroying this resource only stops managing the section — the applied values remain on the controller.
@@ -54,6 +55,45 @@ resource "jenkins_configuration_as_code" "unclassified" {
                   credentialsId: "shared-pipeline-token"
   YAML
 }
+
+# A secret held by Terraform rather than by a secret source on the controller:
+# the provider replaces ${client_secret} with the write-only value just before
+# sending the section, and state keeps the placeholder. Change
+# secrets_wo_version to re-send a rotated value.
+#
+# The role plugin exports permissions in an order of its own, so the
+# permission lists are compared without regard to order.
+resource "jenkins_configuration_as_code" "security" {
+  section = "jenkins"
+  yaml = yamlencode({
+    securityRealm = {
+      oic = {
+        clientId     = "jenkins"
+        clientSecret = "$${client_secret}"
+        serverConfiguration = {
+          wellKnown = {
+            wellKnownOpenIDConfigurationUrl = "https://sso.example.com/.well-known/openid-configuration"
+          }
+        }
+      }
+    }
+    authorizationStrategy = {
+      roleBased = {
+        roles = {
+          global = [{
+            name        = "readers"
+            permissions = ["Overall/Read", "Job/Read"]
+            entries     = [{ group = "authenticated" }]
+          }]
+        }
+      }
+    }
+  })
+
+  secrets_wo         = { client_secret = var.oidc_client_secret }
+  secrets_wo_version = "1"
+  unordered_paths    = ["authorizationStrategy.roleBased.roles.*.*.permissions"]
+}
 ```
 
 <!-- schema generated by tfplugindocs -->
@@ -62,7 +102,15 @@ resource "jenkins_configuration_as_code" "unclassified" {
 ### Required
 
 - `section` (String) The top-level JCasC configuration section this resource manages, e.g. `jenkins`, `security`, `unclassified`, or `tool`. Changing it forces replacement.
-- `yaml` (String) The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation.
+- `yaml` (String) The YAML subtree for `section` (the content *under* the section key, not including the key itself). May reference secrets with JCasC `${VAR}` interpolation, or `${name}` for a key of `secrets_wo`.
+
+### Optional
+
+> **NOTE**: [Write-only arguments](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments) are supported in Terraform 1.11 and later.
+
+- `secrets_wo` (Map of String, Sensitive, [Write-only](https://developer.hashicorp.com/terraform/language/resources/ephemeral#write-only-arguments)) Secret values substituted into `yaml` by the provider, keyed by name: every `${name}` expression in a string of `yaml` is replaced by the value of `name` just before the section is sent to the controller. Write-only: the values are **never stored in Terraform state or plan**, and `yaml` keeps the `${name}` form, which drift detection compares as a placeholder. Only exactly `${name}` is replaced; any other `${...}` is left for JCasC to resolve. A `${` inside a value is sent escaped, so JCasC does not resolve it. Every key must be referenced in `yaml`. Requires Terraform >= 1.11 and must be paired with `secrets_wo_version`.
+- `secrets_wo_version` (String) Version identifier for `secrets_wo`. Because write-only values are not stored in state, Terraform cannot detect when they change; change this value (e.g. after rotating a secret) to have Terraform re-apply the section with the new values. Required when `secrets_wo` is set.
+- `unordered_paths` (Set of String) Paths, within `section`, of the lists compared without regard to order: same length, and each declared element matching a distinct controller element. A path is mapping keys joined by dots, where `*` stands for any key or any list element, e.g. `authorizationStrategy.roleBased.roles.*.*.permissions`. Only use it for lists whose order the controller does not keep: JCasC still applies the list as declared.
 
 ### Read-Only
 

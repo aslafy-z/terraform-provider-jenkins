@@ -52,6 +52,18 @@ unclassified:
 `
 }
 
+// cascNullModel returns a model with section and yaml set and every optional
+// attribute null, as a configuration that sets neither would plan it.
+func cascNullModel(section, yaml string) configurationAsCodeResourceModel {
+	return configurationAsCodeResourceModel{
+		Section:          types.StringValue(section),
+		YAML:             types.StringValue(yaml),
+		SecretsWo:        types.MapNull(types.StringType),
+		SecretsWoVersion: types.StringNull(),
+		UnorderedPaths:   types.SetNull(types.StringType),
+	}
+}
+
 func cascTestResource(export string) (*configurationAsCodeResource, rschema.Schema) {
 	r := &configurationAsCodeResource{resourceHelper: &resourceHelper{client: &mockJenkinsClient{
 		mockExportCASC: func(context.Context) (string, error) { return export, nil },
@@ -155,11 +167,11 @@ mailer:
 		t.Run(tc.name, func(t *testing.T) {
 			r, s := cascTestResource(tc.export)
 			st := tfsdk.State{Schema: s}
-			st.Set(ctx, configurationAsCodeResourceModel{
-				ID:      types.StringValue("unclassified"),
-				Section: types.StringValue("unclassified"),
-				YAML:    types.StringValue(tc.declared),
-			})
+			m := cascNullModel("unclassified", tc.declared)
+			m.ID = types.StringValue("unclassified")
+			if diags := st.Set(ctx, m); diags.HasError() {
+				t.Fatalf("setting state: %v", diags)
+			}
 			resp := resource.ReadResponse{State: st}
 			r.Read(ctx, resource.ReadRequest{State: st}, &resp)
 			if resp.Diagnostics.HasError() {

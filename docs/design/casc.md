@@ -86,6 +86,17 @@ every default value. Comparing it verbatim would report constant drift.
   subtree, and compare it against the declared `yaml` as a **deep subset**:
   only keys present in the declared document are compared; unmanaged keys and
   plugin defaults within the section are ignored.
+- **Sequences.** A list compares in order and by length, because JCasC list
+  configurators replace the list. Some lists come back in an order of their
+  own (a set exported in hash order, such as role-strategy permissions or
+  `disabledAdministrativeMonitors`), so a declared list can never equal its
+  export. `unordered_paths` names such lists: a path is mapping keys joined by
+  dots, `*` standing for any key or any list element. A list at a matching
+  path is equal when it has the same length and each declared element pairs
+  with a distinct exported element it is a subset of (maximum bipartite
+  matching, so a loose element cannot take the only partner of a stricter
+  one). Opt-in, because JCasC still applies the declared order, and for an
+  ordered list a reorder is real drift.
 - **Normalization.** Both sides are parsed YAML → generic maps and compared
   semantically: key order, indentation, quoting style, and scalar formatting
   are not drift. This mirrors the semantic-equality approach already used for
@@ -110,6 +121,18 @@ every default value. Comparing it verbatim would report constant drift.
   resolved value — the export re-emits such keys as their interpolated form or a
   redacted marker, so we compare structurally and never resolve. This prevents
   both false drift and secret leakage.
+- **Write-only secrets.** `${name}` naming a key of the write-only
+  `secrets_wo` map is replaced by the provider, on the parsed document just
+  before the POST, so the secret needs no secret source on the controller and
+  its value cannot change the YAML structure. Plan and state keep `${name}`,
+  which drift detection compares as a placeholder like any other. JCasC
+  resolves `${...}` in what it receives and replaces an unknown variable with
+  an empty string, so a `${` inside a value is sent as `^${`, which JCasC
+  stores as a literal `${` (and exports re-escaped). Only exactly `${name}` is
+  replaced; `${name:-default}` and other names stay for JCasC. A key that no
+  expression references is rejected at plan, since its value would silently
+  not apply. Like the credential `_wo` attributes, `secrets_wo_version` is the
+  trigger to re-send a changed value.
 - **Drift view.** When a declared key drifts, Read does not store the exported
   section, which holds the resolved values and every unmanaged key (#249). It
   stores a view limited to the declared keys: in-sync subtrees and `${...}`
@@ -118,7 +141,9 @@ every default value. Comparing it verbatim would report constant drift.
   a fixed marker. That covers a type change, a drifted list that holds a
   `${...}` (its elements are matched by index, so a reorder could move a
   resolved value), a list element beyond the declared ones, and a string with
-  an embedded `${...}`.
+  an embedded `${...}`. A drifted unordered list keeps the declared elements
+  that still pair with an exported one, then the unpaired exported elements,
+  scalars as is and others as the marker.
 - **Import.** There is no declared document to limit the export to, so import
   records only `section` and leaves `yaml` null; the first apply re-applies the
   configured document.

@@ -158,3 +158,85 @@ func testAccCheckCASCSectionContains(section, want string) resource.TestCheckFun
 		return nil
 	}
 }
+
+// TestAccJenkinsConfigurationAsCode_secretsWo applies a section whose secret
+// comes from secrets_wo, then rotates it with secrets_wo_version. The value
+// holds a "${" that JCasC must keep literal rather than resolve to an empty
+// string, and it must never reach state.
+func TestAccJenkinsConfigurationAsCode_secretsWo(t *testing.T) {
+	first := "tf-acc-wo-" + acctest.RandStringFromCharSet(12, acctest.CharSetAlphaNum)
+	second := "tf-acc-wo-" + acctest.RandStringFromCharSet(12, acctest.CharSetAlphaNum)
+	config := func(value, version string) string {
+		return fmt.Sprintf(`
+resource jenkins_configuration_as_code test {
+  section            = "jenkins"
+  yaml               = yamlencode({ systemMessage = "$${message}" })
+  secrets_wo         = { message = "%s-$${literal}" }
+  secrets_wo_version = "%s"
+}`, value, version)
+	}
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config: config(first, "1"),
+				Check: resource.ComposeTestCheckFunc(
+					// The export escapes a literal "${" as "^${".
+					testAccCheckCASCSectionContains("jenkins", first+"-^${literal}"),
+					testAccCheckStateOmits(first),
+					resource.TestCheckResourceAttr("jenkins_configuration_as_code.test", "yaml", "\"systemMessage\": \"${message}\"\n"),
+				),
+			},
+			{
+				Config: config(second, "2"),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCASCSectionContains("jenkins", second+"-^${literal}"),
+					testAccCheckStateOmits(second),
+				),
+			},
+		},
+	})
+}
+
+// testAccCASCMonitorsConfig declares disabledAdministrativeMonitors, a set the
+// controller exports in an order of its own, not in the declared one.
+func testAccCASCMonitorsConfig(unordered bool) string {
+	paths := ""
+	if unordered {
+		paths = `unordered_paths = ["disabledAdministrativeMonitors"]`
+	}
+	return fmt.Sprintf(`
+resource jenkins_configuration_as_code test {
+  section = "jenkins"
+  yaml    = yamlencode({
+    disabledAdministrativeMonitors = [
+      "jenkins.security.QueueItemAuthenticatorMonitor",
+      "hudson.diagnosis.ReverseProxySetupMonitor",
+      "jenkins.diagnostics.RootUrlNotSetMonitor",
+      "hudson.model.UpdateCenter$CoreUpdateMonitor",
+    ]
+  })
+  %s
+}`, paths)
+}
+
+// TestAccJenkinsConfigurationAsCode_unorderedPaths applies a list the
+// controller reorders: in order it never converges, with unordered_paths the
+// plan after the apply is empty.
+func TestAccJenkinsConfigurationAsCode_unorderedPaths(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProviders,
+		Steps: []resource.TestStep{
+			{
+				Config:             testAccCASCMonitorsConfig(false),
+				ExpectNonEmptyPlan: true,
+			},
+			{
+				Config: testAccCASCMonitorsConfig(true),
+			},
+		},
+	})
+}
