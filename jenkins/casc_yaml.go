@@ -251,7 +251,7 @@ func cascInSync(declaredSectionYAML, exportedFullYAML, section string, unordered
 //     length, each element viewed against the declared element at the same
 //     index;
 //   - a drifted unordered sequence that did not grow keeps paired declared
-//     elements, then unpaired controller elements;
+//     elements, then a marker for each unpaired controller element;
 //   - anything else, including a drifted sequence the controller grew, is
 //     replaced by cascDriftMarker.
 //
@@ -323,34 +323,19 @@ func driftView(declared, actual interface{}, at []string, unordered cascPaths) i
 	}
 }
 
-// unorderedDriftView renders a drifted unordered sequence: the declared
-// elements that pair with a controller element, in declared order, then the
-// unpaired controller scalars, in export order, then one cascDriftMarker per
-// other unpaired controller element, which has no declared counterpart to
-// restrict it to. The markers come last so that a refresh, which pairs the
-// copied scalars with themselves, renders the view unchanged. The caller has
-// already hidden a sequence holding ${...}.
+// unorderedDriftView keeps paired declared elements, followed by one marker
+// per unpaired controller element. Without an index correspondence, an unpaired
+// scalar may be an unmanaged value, a type change, or a value hidden on a prior
+// refresh. Never copy it. The caller has already hidden lists holding ${...}.
 func unorderedDriftView(declared, actual []interface{}, at []string, unordered cascPaths) []interface{} {
-	pairs, _ := matchUnordered(declared, actual, at, unordered)
-	paired := make([]bool, len(actual))
+	pairs, n := matchUnordered(declared, actual, at, unordered)
 	out := make([]interface{}, 0, len(actual))
 	for i, j := range pairs {
 		if j >= 0 {
-			paired[j] = true
 			out = append(out, declared[i])
 		}
 	}
-	hidden := 0
-	for j, av := range actual {
-		switch {
-		case paired[j]:
-		case isYAMLScalar(av):
-			out = append(out, av)
-		default:
-			hidden++
-		}
-	}
-	for ; hidden > 0; hidden-- {
+	for hidden := len(actual) - n; hidden > 0; hidden-- {
 		out = append(out, cascDriftMarker)
 	}
 	return out

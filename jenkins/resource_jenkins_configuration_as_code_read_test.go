@@ -671,3 +671,62 @@ func TestConfigurationAsCodeReadUnorderedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigurationAsCodeUpdateComparisonOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name, prior, planned, exported string
+		exportError                    bool
+		wantApply, wantError           bool
+	}{
+		{name: "paths only in sync", prior: "list: [a, b]", planned: "list: [a, b]", exported: "jenkins:\n  list: [b, a]"},
+		{name: "drift still applies", prior: "list: [a, b]", planned: "list: [a, b]", exported: "jenkins:\n  list: [a, c]", wantApply: true},
+		{name: "yaml change applies", prior: "list: [a]", planned: "list: [a, b]", wantApply: true},
+		{name: "export failure stops update", prior: "list: [a, b]", planned: "list: [a, b]", exportError: true, wantError: true},
+		{name: "invalid export stops update", prior: "list: [a, b]", planned: "list: [a, b]", exported: "[bad", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			applied := false
+			r, s := cascTestResource(tc.exported)
+			r.client = &mockJenkinsClient{
+				mockExportCASC: func(context.Context) (string, error) {
+					if tc.exportError {
+						return "", fmt.Errorf("export failed")
+					}
+					return tc.exported, nil
+				},
+				mockApplyCASC: func(context.Context, string) error { applied = true; return nil },
+			}
+			before := cascNullModel("jenkins", tc.prior)
+			before.ID = before.Section
+			after := cascNullModel("jenkins", tc.planned)
+			after.ID = after.Section
+			after.UnorderedPaths = types.SetValueMust(types.StringType, []attr.Value{types.StringValue("list")})
+			st := tfsdk.State{Schema: s}
+			plan := tfsdk.Plan{Schema: s}
+			if d := st.Set(ctx, before); d.HasError() {
+				t.Fatal(d)
+			}
+			if d := plan.Set(ctx, after); d.HasError() {
+				t.Fatal(d)
+			}
+			resp := resource.UpdateResponse{State: st}
+			r.Update(ctx, resource.UpdateRequest{Plan: plan, State: st}, &resp)
+			if resp.Diagnostics.HasError() != tc.wantError {
+				t.Fatalf("diags: %v", resp.Diagnostics)
+			}
+			if applied != tc.wantApply {
+				t.Fatalf("applied=%v, want %v", applied, tc.wantApply)
+			}
+			if !tc.wantError {
+				var got configurationAsCodeResourceModel
+				if d := resp.State.Get(ctx, &got); d.HasError() {
+					t.Fatal(d)
+				}
+				if !got.UnorderedPaths.Equal(after.UnorderedPaths) || !got.YAML.Equal(after.YAML) {
+					t.Fatalf("state did not retain plan: %#v", got)
+				}
+			}
+		})
+	}
+}

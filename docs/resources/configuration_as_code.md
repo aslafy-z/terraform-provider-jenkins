@@ -30,30 +30,20 @@ Requires the `configuration-as-code` plugin and an account with `Overall/Adminis
 ## Example Usage
 
 ```terraform
-# Manage the jenkins section. The system message alone is a safe first step for
-# JCasC adoption; later jenkins settings go into this same resource, since one
-# instance owns a whole top-level section.
-#
-# The role plugin exports permissions in an order of its own, so the
-# permission lists are compared without regard to order.
+# Manage settings in one resource per top-level section. This list disables
+# informational URL/setup monitors; it does not change authorization or roles.
+# JCasC replaces the entire list, so include any other monitors you want disabled.
 resource "jenkins_configuration_as_code" "jenkins" {
   section = "jenkins"
   yaml = yamlencode({
     systemMessage = "Managed by Terraform: do not edit in the UI."
-    authorizationStrategy = {
-      roleBased = {
-        roles = {
-          global = [{
-            name        = "readers"
-            permissions = ["Overall/Read", "Job/Read"]
-            entries     = [{ group = "authenticated" }]
-          }]
-        }
-      }
-    }
+    disabledAdministrativeMonitors = [
+      "hudson.diagnosis.ReverseProxySetupMonitor",
+      "jenkins.diagnostics.RootUrlNotSetMonitor",
+    ]
   })
 
-  unordered_paths = ["authorizationStrategy.roleBased.roles.*.*.permissions"]
+  unordered_paths = ["disabledAdministrativeMonitors"]
 }
 
 # A second instance can own a different top-level section. Secrets use JCasC
@@ -85,7 +75,7 @@ resource "jenkins_configuration_as_code" "unclassified" {
 
 ### Optional
 
-- `unordered_paths` (Set of String) Paths, within `section`, of the lists compared without regard to order: same length, and each declared element matching a distinct controller element. A path is mapping keys joined by dots, where `*` stands for any key or any list element, e.g. `authorizationStrategy.roleBased.roles.*.*.permissions`. Only use it for lists whose order the controller does not keep: JCasC still applies the list as declared.
+- `unordered_paths` (Set of String) Paths, within `section`, of the lists compared without regard to order: same length, and each declared element matching a distinct controller element. A path is mapping keys joined by dots, where `*` stands for any key or any list element, e.g. `authorizationStrategy.roleBased.roles.*.*.permissions`. A path must address a list exactly; paths matching no list are silently ignored. Use one `*` for each list element traversed. Only use it for lists whose order the controller does not keep: JCasC still applies the list as declared.
 
 ### Read-Only
 

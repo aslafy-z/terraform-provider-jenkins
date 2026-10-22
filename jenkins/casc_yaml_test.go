@@ -625,6 +625,24 @@ func TestCASCDriftViewUnordered(t *testing.T) {
 		want     string
 	}{
 		{
+			name:     "map to scalar hides unmanaged value",
+			declared: "list: [{a: 1}, x]\n",
+			export:   "s:\n  list: [unmanaged-cipher, x]\n",
+			want:     "list: [x, \"" + cascDriftMarker + "\"]\n",
+		},
+		{
+			name:     "stored marker stays hidden",
+			declared: "list: [a, \"" + cascDriftMarker + "\"]\n",
+			export:   "s:\n  list: [a, unmanaged-cipher]\n",
+			want:     "list: [a, \"" + cascDriftMarker + "\"]\n",
+		},
+		{
+			name:     "placeholder guard precedes unordered matching",
+			declared: "list: ['${A}', b]\n",
+			export:   "s:\n  list: [c, unmanaged-resolved-secret]\n",
+			want:     "list: \"" + cascDriftMarker + "\"\n",
+		},
+		{
 			name:     "reordered list in sync keeps the declared order",
 			declared: "list: [a, b]\nother: 1\n",
 			export:   "s:\n  list: [b, a]\n  other: 2\n",
@@ -637,10 +655,10 @@ func TestCASCDriftViewUnordered(t *testing.T) {
 			want:     "list: \"" + cascDriftMarker + "\"\n",
 		},
 		{
-			name:     "paired elements first, then unpaired controller scalars",
+			name:     "paired elements first, then hidden unpaired elements",
 			declared: "list: [a, b, c]\n",
 			export:   "s:\n  list: [c, x, a]\n",
-			want:     "list: [a, c, x]\n",
+			want:     "list: [a, c, \"" + cascDriftMarker + "\"]\n",
 		},
 		{
 			name:     "unpaired controller mapping is hidden",
@@ -649,12 +667,12 @@ func TestCASCDriftViewUnordered(t *testing.T) {
 			want:     "objs:\n  - name: b\n  - \"" + cascDriftMarker + "\"\n",
 		},
 		{
-			// In export order the marker would come before x, and a refresh,
-			// pairing x with itself, would move it after.
-			name:     "unpaired controller scalars come before the markers",
+			// Neither an unmatched mapping nor an unmatched scalar has a
+			// declared counterpart that would make it safe to copy.
+			name:     "all unpaired controller elements are hidden",
 			declared: "list: [a, b, c]\n",
 			export:   "s:\n  list:\n    - a\n    - {token: unmanaged}\n    - x\n",
-			want:     "list: [a, x, \"" + cascDriftMarker + "\"]\n",
+			want:     "list: [a, \"" + cascDriftMarker + "\", \"" + cascDriftMarker + "\"]\n",
 		},
 	}
 	for _, tc := range cases {

@@ -544,10 +544,8 @@ resource jenkins_configuration_as_code test {
   section = "jenkins"
   yaml    = yamlencode({
     disabledAdministrativeMonitors = [
-      "jenkins.security.QueueItemAuthenticatorMonitor",
       "hudson.diagnosis.ReverseProxySetupMonitor",
       "jenkins.diagnostics.RootUrlNotSetMonitor",
-      "hudson.model.UpdateCenter$CoreUpdateMonitor",
     ]
   })
   %s
@@ -558,8 +556,22 @@ resource jenkins_configuration_as_code test {
 // controller reorders: in order it never converges, with unordered_paths the
 // plan after the apply is empty.
 func TestAccJenkinsConfigurationAsCode_unorderedPaths(t *testing.T) {
+	var original interface{}
 	resource.Test(t, resource.TestCase{
-		PreCheck:                 func() { testAccPreCheck(t) },
+		PreCheck: func() {
+			testAccPreCheck(t)
+			original = testAccCASCJenkinsValue(t, "disabledAdministrativeMonitors")
+		},
+		CheckDestroy: func(*terraform.State) error {
+			if original == nil {
+				original = []interface{}{}
+			}
+			doc, err := yaml.Marshal(map[string]interface{}{"jenkins": map[string]interface{}{"disabledAdministrativeMonitors": original}})
+			if err != nil {
+				return err
+			}
+			return testAccClient.ApplyCASC(context.Background(), string(doc))
+		},
 		ProtoV6ProviderFactories: testAccProviders,
 		Steps: []resource.TestStep{
 			{

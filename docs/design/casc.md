@@ -96,7 +96,11 @@ every default value. Comparing it verbatim would report constant drift.
   with a distinct exported element it is a subset of (maximum bipartite
   matching, so a loose element cannot take the only partner of a stricter
   one). Opt-in, because JCasC still applies the declared order, and for an
-  ordered list a reorder is real drift.
+  ordered list a reorder is real drift. A path must address a list exactly;
+  a path matching no list is silently ignored. Use one `*` for each list
+  element traversed. Changing only these paths skips the JCasC apply when
+  the section and YAML are unchanged and the live export is in sync under
+  the new paths.
 - **Normalization.** Both sides are parsed YAML → generic maps and compared
   semantically: key order, indentation, quoting style, and scalar formatting
   are not drift. This mirrors the semantic-equality approach already used for
@@ -132,8 +136,8 @@ every default value. Comparing it verbatim would report constant drift.
   document does not declare, and one inserted before the declared ones shifts
   into a declared index), and a string with an embedded `${...}`. Such a list
   is hidden whole. A drifted unordered list that did not grow keeps the
-  declared elements that still pair with an exported one, then the unpaired
-  exported scalars, then a marker for each other unpaired element; the markers
+  declared elements that still pair with an exported one, then a marker for
+  every unpaired element, including scalars; the markers
   come last so a refresh of the view renders it unchanged.
 - **Import.** There is no declared document to limit the export to, so import
   records only `section` and leaves `yaml` null; the first apply re-applies the

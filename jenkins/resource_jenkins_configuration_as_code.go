@@ -84,6 +84,7 @@ Requires the ` + "`configuration-as-code`" + ` plugin and an account with ` + "`
 				Optional:    true,
 				MarkdownDescription: "Paths, within `section`, of the lists compared without regard to order: same length, and each declared element matching a distinct controller element. " +
 					"A path is mapping keys joined by dots, where `*` stands for any key or any list element, e.g. `authorizationStrategy.roleBased.roles.*.*.permissions`. " +
+					"A path must address a list exactly; paths matching no list are silently ignored. Use one `*` for each list element traversed. " +
 					"Only use it for lists whose order the controller does not keep: JCasC still applies the list as declared.",
 				Validators: []validator.Set{
 					setvalidator.ValueStringsAre(stringvalidator.RegexMatches(reCASCPath, "must be keys or '*' joined by '.', without whitespace, '*' standing for a whole segment")),
@@ -170,6 +171,37 @@ func (r *configurationAsCodeResource) Update(ctx context.Context, req resource.U
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	// Changing comparison policy alone must not reapply the section (and the
+	// controller's configured CASC files). Check the live export with the new
+	// paths first; real drift and YAML changes still require an apply.
+	var prior configurationAsCodeResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if data.Section.Equal(prior.Section) && data.YAML.Equal(prior.YAML) && !data.UnorderedPaths.Equal(prior.UnorderedPaths) {
+		unordered, diags := unorderedPaths(ctx, data.UnorderedPaths)
+		resp.Diagnostics.Append(diags...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		exported, err := r.client.ExportCASC(ctx)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Refresh Resource", "Could not export JCasC configuration.\n\nError: "+err.Error())
+			return
+		}
+		inSync, err := cascInSync(data.YAML.ValueString(), exported, data.Section.ValueString(), unordered)
+		if err != nil {
+			resp.Diagnostics.AddError("Unable to Compare Configuration", err.Error())
+			return
+		}
+		if inSync {
+			data.ID = data.Section
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			return
+		}
 	}
 
 	if !r.apply(ctx, &data, &resp.Diagnostics) {
