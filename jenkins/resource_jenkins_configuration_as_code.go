@@ -3,7 +3,7 @@ package jenkins
 import (
 	"context"
 	"errors"
-	"sort"
+	"fmt"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
@@ -37,6 +37,7 @@ var _ resource.ResourceWithConfigure = &configurationAsCodeResource{}
 var _ resource.ResourceWithImportState = &configurationAsCodeResource{}
 var _ resource.ResourceWithConfigValidators = &configurationAsCodeResource{}
 var _ resource.ResourceWithValidateConfig = &configurationAsCodeResource{}
+var _ resource.ResourceWithModifyPlan = &configurationAsCodeResource{}
 
 func newConfigurationAsCodeResource() resource.Resource {
 	return &configurationAsCodeResource{
@@ -94,16 +95,18 @@ Requires the ` + "`configuration-as-code`" + ` plugin and an account with ` + "`
 				MarkdownDescription: "Secret values substituted into `yaml` by the provider, keyed by name: every `${name}` expression in a string of `yaml` is replaced by the value of `name` just before the section is sent to the controller. " +
 					"Write-only: the values are **never stored in Terraform state or plan**, and `yaml` keeps the `${name}` form, which drift detection compares as a placeholder when it is the whole value. " +
 					"Embedded in a longer string (`https://user:${name}@host/`) it never equals what the controller exports, so the section plans a change on every run. " +
-					"Only exactly `${name}` is replaced, also nested as in `${decodeBase64:${name}}`; any other `${...}`, and `^${name}` (JCasC's escape for a literal), is left for JCasC. A `${` inside a value is sent escaped, so JCasC does not resolve it. " +
-					"A value nested in another expression must not hold `$`, `{`, `}` or `^`, and a value must not end with `^` right before another expression: JCasC syntax has no escape for either, so the apply fails. " +
+					"Only exactly `${name}` is replaced, also nested as in `${decodeBase64:${name}}`; any other `${...}`, and `^${name}` (JCasC's escape for a literal), is left for JCasC. A `${` inside a value is escaped only when a closing `}` follows in the assembled string; an unclosed `${` stays literal. " +
+					"A value nested in another expression must not hold `$`, `{`, `}`, `^` or `:-`, and a value must not end with `^` right before another expression: JCasC syntax has no escape for either, so the apply fails. " +
+					"Nested transforming lookups can resolve `${...}` again in their output, including controller environment variables, system properties and file lookups. Decode in Terraform instead: `secrets_wo = { x = base64decode(var.b64) }` with a top-level `${x}` in YAML. Controller error text is omitted whenever write-only secrets are sent. " +
 					"Every key must be referenced in `yaml`. Requires Terraform >= 1.11 and must be paired with `secrets_wo_version`.",
 				Validators: []validator.Map{
+					mapvalidator.NoNullValues(),
 					mapvalidator.KeysAre(stringvalidator.RegexMatches(reCASCSecretName, "must start with a letter or '_' and hold only letters, digits, '_', '.' or '-'")),
 				},
 			},
 			"secrets_wo_version": schema.StringAttribute{
 				Optional:            true,
-				MarkdownDescription: "Version identifier for `secrets_wo`. Because write-only values are not stored in state, Terraform cannot detect when they change; change this value (e.g. after rotating a secret) to have Terraform re-apply the section with the new values. Required when `secrets_wo` is set.",
+				MarkdownDescription: "Version identifier for `secrets_wo`. Because write-only values are not stored in state, Terraform cannot detect when they change; change this value (e.g. after rotating a secret) to have Terraform re-apply the section with the new values. Current values are sent on every section apply, including YAML changes; the version triggers an apply when only secret values change. Removing the pair while interpolation remains warns that JCasC may resolve it to an empty value. Required when `secrets_wo` is set.",
 			},
 		},
 	}
@@ -304,29 +307,46 @@ func (r *configurationAsCodeResource) apply(ctx context.Context, config tfsdk.Co
 		return false
 	}
 	if err := r.client.ApplyCASC(ctx, doc); err != nil {
-		diags.AddError("Unable to Apply Configuration", "JCasC rejected the configuration for section "+data.Section.ValueString()+".\n\nError: "+redactCASCSecrets(err.Error(), secrets))
+		detail := "JCasC rejected the configuration for section " + data.Section.ValueString() + ".\n\nError: " + err.Error()
+		if len(secrets) > 0 {
+			// The controller may quote JSON/HTML-escaped or transformed values.
+			// Even masking a short value in fixed text discloses information.
+			// Keep only the typed HTTP status; never inspect or echo the body.
+			status := ""
+			var applyErr *cascApplyError
+			if errors.As(err, &applyErr) {
+				status = fmt.Sprintf(" (HTTP %d)", applyErr.status)
+			}
+			detail = "JCasC rejected the configuration" + status + ". Controller error details are omitted because this request contains write-only secrets."
+		}
+		diags.AddError("Unable to Apply Configuration", detail)
 		return false
 	}
 	return true
 }
 
-// redactCASCSecrets hides the secrets_wo values in msg: the document posted to
-// JCasC holds them in clear, and its error can quote what it was given.
-// Longer values are matched first, so one holding another is hidden whole.
-func redactCASCSecrets(msg string, secrets map[string]string) string {
-	var values []string
-	for _, v := range secrets {
-		if v != "" {
-			values = append(values, v)
+// ModifyPlan warns when removing the write-only source leaves interpolation
+// behind. Secret keys are not stored, so we cannot determine whether an
+// expression will resolve from another source or become empty on the controller.
+func (r *configurationAsCodeResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.State.Raw.IsNull() || req.Plan.Raw.IsNull() {
+		return
+	}
+	var prior, planned configurationAsCodeResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &prior)...)
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &planned)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if prior.SecretsWoVersion.IsNull() || prior.SecretsWoVersion.IsUnknown() || !planned.SecretsWoVersion.IsNull() {
+		return
+	}
+	if !planned.YAML.IsUnknown() {
+		tree, err := parseYAML(planned.YAML.ValueString())
+		if err != nil || !hasInterpolation(tree) {
+			return
 		}
 	}
-	if len(values) == 0 {
-		return msg
-	}
-	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
-	pairs := make([]string, 0, 2*len(values))
-	for _, v := range values {
-		pairs = append(pairs, v, "(sensitive value)")
-	}
-	return strings.NewReplacer(pairs...).Replace(msg)
+	resp.Diagnostics.AddAttributeWarning(path.Root("secrets_wo_version"), "Write-only Secret Source Removed",
+		"The write-only secret source is being removed while YAML still contains interpolation or is not yet known. JCasC will resolve remaining expressions from its own secret sources and may replace missing values with empty strings. Remove the references or configure a controller secret source before applying.")
 }

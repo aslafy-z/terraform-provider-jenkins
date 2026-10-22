@@ -22,11 +22,6 @@ import (
 // deep subset: only keys the practitioner declares are compared, so the many
 // default and unmanaged keys in the export are ignored.
 
-// reInterpolation matches a JCasC ${...} expression anywhere in a string.
-// JCasC resolves embedded expressions too, so the value exported for such a
-// string may hold a resolved secret.
-var reInterpolation = regexp.MustCompile(`\$\{[^}]+\}`)
-
 // cascDriftMarker stands in, in a drift view, for a controller value that is
 // not copied into state because it could hold a resolved secret or keys the
 // resource does not manage.
@@ -312,7 +307,7 @@ func driftView(declared, actual interface{}) interface{} {
 func hasInterpolation(v interface{}) bool {
 	switch t := v.(type) {
 	case string:
-		return reInterpolation.MatchString(t)
+		return len(cascExprs(t)) > 0
 	case map[string]interface{}:
 		for _, e := range t {
 			if hasInterpolation(e) {
@@ -390,26 +385,35 @@ func substituteSecrets(tree interface{}, secrets map[string]string) (interface{}
 // substituteString substitutes secrets into one string scalar; see
 // substituteSecrets. JCasC resolves ${...} in the document it receives, so a
 // "${" inside a value is sent as "^${", which JCasC turns back into a literal
-// "${". A '$' and a '{' that only meet across the edge of a value would form a
-// "${" too, so that '$' is escaped the same way.
+// "${" when a closing brace follows in the assembled scalar. An unclosed
+// "${" is left literal. A '$' and a '{' that only meet across the edge of a
+// value would form a "${" too, so that '$' is escaped the same way.
 //
 // Two cases have no escape, so they are errors rather than a document JCasC
 // would read differently: a value ending in '^' right before an expression,
 // which JCasC would take as the escape of that expression; and a value nested
-// in another expression holding '$', '{', '}' or '^', since JCasC finds the
-// end of the outer expression by counting every "${" and '}' in it.
+// in another expression holding '$', '{', '}', '^' or ':-', since JCasC
+// interprets these as expression boundaries, escaping or a default delimiter.
 func substituteString(s string, secrets map[string]string) (string, error) {
 	var out []byte
+	var escapes []int
 	last := 0
 	prev := ""
-	appendText := func(text string) error {
-		if strings.HasPrefix(text, "${") && len(out) > 0 && out[len(out)-1] == '^' {
+	appendText := func(text string, secret bool) error {
+		if !secret && strings.HasPrefix(text, "${") && len(out) > 0 && out[len(out)-1] == '^' {
 			return fmt.Errorf("%w: the value of %q ends with '^' right before a JCasC expression in %q, and JCasC would read that '^' as an escape and leave the expression unresolved", errCASCSecretValue, prev, s)
 		}
 		if strings.HasPrefix(text, "{") && len(out) > 0 && out[len(out)-1] == '$' {
+			escapes = append(escapes, len(out)-1)
 			out = append(out[:len(out)-1], '^', '$')
 		}
-		out = append(out, text...)
+		for i := 0; i < len(text); i++ {
+			if secret && strings.HasPrefix(text[i:], "${") {
+				escapes = append(escapes, len(out))
+				out = append(out, '^')
+			}
+			out = append(out, text[i])
+		}
 		return nil
 	}
 	for _, ref := range cascSecretRefs(s) {
@@ -417,13 +421,13 @@ func substituteString(s string, secrets map[string]string) (string, error) {
 		if !ok {
 			continue
 		}
-		if ref.outer != [2]int{ref.start, ref.end} && strings.ContainsAny(v, "${}^") {
-			return "", fmt.Errorf("%w: the value of %q is nested in the JCasC expression %q and holds '$', '{', '}' or '^', which JCasC would read as part of the expression; transform the value in Terraform instead, e.g. with base64decode()", errCASCSecretValue, ref.name, s[ref.outer[0]:ref.outer[1]])
+		if ref.outer != [2]int{ref.start, ref.end} && (strings.ContainsAny(v, "${}^") || strings.Contains(v, ":-")) {
+			return "", fmt.Errorf("%w: the value of %q is nested in the JCasC expression %q and holds '$', '{', '}', '^' or ':-', which JCasC would read as part of the expression; transform the value in Terraform instead, e.g. with base64decode()", errCASCSecretValue, ref.name, s[ref.outer[0]:ref.outer[1]])
 		}
-		if err := appendText(s[last:ref.start]); err != nil {
+		if err := appendText(s[last:ref.start], false); err != nil {
 			return "", err
 		}
-		if err := appendText(strings.ReplaceAll(v, "${", "^${")); err != nil {
+		if err := appendText(v, true); err != nil {
 			return "", err
 		}
 		last = ref.end
@@ -432,8 +436,17 @@ func substituteString(s string, secrets map[string]string) (string, error) {
 	if last == 0 {
 		return s, nil
 	}
-	if err := appendText(s[last:]); err != nil {
+	if err := appendText(s[last:], false); err != nil {
 		return "", err
+	}
+	// JCasC removes an escape only if a closing brace follows. Decide after
+	// assembling the scalar so a brace from a suffix or adjacent value counts.
+	lastClose := strings.LastIndexByte(string(out), '}')
+	for i := len(escapes) - 1; i >= 0; i-- {
+		at := escapes[i]
+		if at > lastClose {
+			out = append(out[:at], out[at+1:]...)
+		}
 	}
 	return string(out), nil
 }

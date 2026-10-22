@@ -575,8 +575,12 @@ func TestSubstituteSecrets(t *testing.T) {
 		t.Errorf("substitution mismatch:\n got: %s", doc)
 	}
 
-	if out, _ := wrapSection("jenkins", declared, nil); strings.Contains(out, "s3cr3t") {
-		t.Error("no secrets must leave the document unchanged")
+	out, err := wrapSection("jenkins", declared, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(mustParseYAML(t, out), map[string]interface{}{"jenkins": mustParseYAML(t, declared)}) {
+		t.Error("no secrets must leave the parsed document unchanged")
 	}
 
 	edges := map[string]struct {
@@ -588,7 +592,9 @@ func TestSubstituteSecrets(t *testing.T) {
 		"nested expression":                {"${decodeBase64:${K}}", map[string]string{"K": "Zm9v"}, "${decodeBase64:Zm9v}"},
 		"value ending in $ before {":       {"${K}{x}", map[string]string{"K": "q$"}, "q^${x}"},
 		"$ before value starting with {":   {"$${K}", map[string]string{"K": "{x}"}, "^${x}"},
-		"adjacent values":                  {"${A}${B}", map[string]string{"A": "a$", "B": "{b"}, "a^${b"},
+		"adjacent values":                  {"${A}${B}", map[string]string{"A": "a$", "B": "{b"}, "a${b"},
+		"unclosed secret":                  {"${K}", map[string]string{"K": "ab${cd"}, "ab${cd"},
+		"unclosed secret closed by suffix": {"${K}}", map[string]string{"K": "ab${cd"}, "ab^${cd}"},
 		"no reference":                     {"plain ${OTHER}", map[string]string{"K": "v"}, "plain ${OTHER}"},
 		"nested deeper":                    {"${A:-${decodeBase64:${K}}}", map[string]string{"K": "Zm9v"}, "${A:-${decodeBase64:Zm9v}}"},
 		"after an escaped expression":      {"^${x ${K}}", map[string]string{"K": "v"}, "^${x v}"},
@@ -615,6 +621,7 @@ func TestSubstituteSecrets(t *testing.T) {
 		"value ending in ^ before an expression": {"${K}${OTHER}", map[string]string{"K": "s3cr3t^"}},
 		"nested value holding }":                 {"${json:p:${K}}", map[string]string{"K": "{\"p\":\"s3cr3t\"}"}},
 		"nested value holding ${":                {"${decodeBase64:${K}}", map[string]string{"K": "s3cr3t${x}"}},
+		"nested default delimiter":               {"${base64:${K}}", map[string]string{"K": "s3cr3t:-b"}},
 		"nested value holding ^":                 {"${decodeBase64:${K}}", map[string]string{"K": "s3cr3t^"}},
 	}
 	for name, tc := range rejected {

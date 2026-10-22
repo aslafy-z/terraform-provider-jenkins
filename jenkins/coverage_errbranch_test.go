@@ -174,7 +174,6 @@ func TestCovE_NodeCascErrors(t *testing.T) {
 	})
 	// casc Update error (ApplyCASC fails) + Read export error
 	cascModel := cascNullModel("jenkins", "systemMessage: hi")
-	cascModel.ID = types.StringNull()
 	covEUpdateErr(ctx, t, &configurationAsCodeResource{resourceHelper: &resourceHelper{client: &mockJenkinsClient{
 		mockApplyCASC: func(context.Context, string) error { return covEBoom() },
 	}}}, &cascModel)
